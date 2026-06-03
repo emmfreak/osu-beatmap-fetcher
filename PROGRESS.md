@@ -93,5 +93,88 @@ its pagination window.
 
 ### Stubbed (intentionally, for later slices)
 
-- `src/pp.py` — PP calculation via `rosu-pp-py` (slice 3).
+- `gui.py` — PyQt6 GUI (slice 4).
+
+---
+
+## Slice 3 — full filters + PP + keyword search ✅ (complete)
+
+### Problem solved
+
+Slice 2 only filtered by star rating and mode. Users need to narrow results by
+key count, BPM, length, PP range, and free-text keywords (mania pattern types
+like "jumpstream", "chordjack", "tech").
+
+### Delivered
+
+- **Full metadata filters** in `src/client.py` and `src/search.py`:
+  - `--keys` — key count filter for mania (e.g. 4 or 7), filters by `cs` field
+  - `--bpm` — BPM range filter (e.g. `180-220`, `180+`)
+  - `--length` — length range in seconds (e.g. `60-180`, `120+`)
+  - All filters compose with each other and flow through the slice-2
+    sweep/shard engine. They're applied both server-side (via osu! search
+    query operators) and client-side (per-beatmap verification).
+
+- **`src/pp.py`** — PP calculation via `rosu-pp-py`:
+  - Computes **max (SS, nomod) PP** — the ceiling assuming 100% accuracy, no
+    mods. This is the same metric PP-farm sites use.
+  - PP is **per-difficulty**, not per-set. The filter checks individual beatmaps
+    matching the user's key count and star range.
+  - **Staged filtering** for performance: cheap metadata filters (stars, BPM,
+    length, keys) run first; `.osu` fetch + PP calc only runs on survivors.
+  - `.osu` files fetched from `https://osu.ppy.sh/osu/{beatmap_id}` (no auth)
+    and cached in `.osu_cache/`.
+  - PP values cached in SQLite `pp_cache` table keyed by beatmap ID — each
+    difficulty is only ever calculated once across runs.
+  - Mania: native maps need no conversion; converts use
+    `beatmap.convert(rosu.GameMode.Mania)`. Max combo is irrelevant for mania
+    PP (accuracy/notecount-driven).
+
+- **Keyword / pattern search** (`-q` / `--query`):
+  - Wires the osu! API `q` parameter as a composable filter through the
+    sweep/shard engine.
+  - Matches tags, difficulty names, title, artist, creator — same as the
+    osu! website search box.
+  - Example: `-q "jumpstream" --keys 4 --stars 4-5` finds 4K jumpstream maps.
+
+- **`src/registry.py`** — added `pp_cache` table with `get_cached_pp()` and
+  `cache_pp()` methods. Schema auto-migrates on first run.
+
+- **`src/client.py`** — `BeatmapsetHit` now carries `beatmaps: list[BeatmapInfo]`
+  with per-difficulty metadata (id, difficulty_rating, bpm, total_length, cs,
+  mode_int). `search_beatmapsets()` accepts all new filter params and applies
+  them both in the query string and client-side.
+
+- **`main.py`** — all new CLI args wired: `--keys`, `--bpm`, `--length`, `--pp`,
+  `-q`/`--query`. Range args support `X-Y`, `X+`, and exact `X` formats.
+
+### How it was verified
+
+1. **Import + unit tests** — all modules import cleanly; registry PP cache
+   round-trips correctly; CLI arg parser handles all range formats.
+2. **PP computation** — fetched a real mania `.osu` file (beatmap 1355822) from
+   `osu.ppy.sh`, cached it, computed max PP (75.36 PP). Also tested osu!std
+   (beatmap 75 → 37.85 PP). Both succeeded.
+3. **No live API credentials** in this environment, so full end-to-end search +
+   download was not tested here. The user should verify with:
+   ```bash
+   python main.py --mode mania --keys 4 -q "jumpstream" --stars 4-5 --count 5
+   python main.py --mode mania --keys 7 --stars 4.5-5.5 --bpm 180+ --pp 200-400 --count 10 --download
+   ```
+
+### Keyword search caveat
+
+osu! has no structured "pattern type" field. The `-q` keyword search only finds
+maps where a human wrote that word into the tags / difficulty name / metadata.
+For mania it works reasonably well (the community tags skillsets fairly often),
+but it's not exhaustive and will occasionally return false positives (e.g.
+"tech" matching a genre or artist). It finds maps *labelled* "jumpstream", not
+every map that *is* jumpstream.
+
+Future: true pattern detection would mean analysing note data in the `.osu` files
+(which are already being fetched for PP). The search layer is modular enough that
+a future `classifier.py` could feed candidate IDs into the same pipeline.
+
+### Stubbed (intentionally, for later slices)
+
 - `gui.py` — PyQt6 GUI (slice 4).
