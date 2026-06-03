@@ -47,3 +47,51 @@
   lazer-only (403 for OAuth apps). See CLAUDE.md.
 - Star filtering uses osu!web text-query operators (`star>=x star<=y`) and is
   re-verified client-side per beatmapset.
+
+---
+
+## Slice 2 — sort-sweep + star-shard search engine ✅ (complete)
+
+### Problem solved
+
+The old single-sort search (slice 1) used only `plays_desc`, which exhausts
+osu!'s pagination window quickly for narrow filters — the tool falsely reports
+"no maps match" when plenty of qualifying maps exist deeper in the result set.
+
+### Delivered
+
+- **`src/search.py`** — `sweep_search()` orchestrates the full pipeline:
+  1. **Star-range sharding:** splits the requested range into ~0.2★ sub-ranges
+     (adaptive width, min 0.1★). Each sub-range gets its own full cursor window.
+  2. **Sort-sweep:** for each shard, searches across 4 sort orders
+     (`plays_desc`, `ranked_desc`, `difficulty_desc`, `favourites_desc`) and
+     unions results by beatmapset ID.
+  3. **Registry dedup:** loads all downloaded IDs from SQLite and excludes them
+     from every API call and from the result pool.
+  - Also includes `single_sort_search()` for baseline comparison.
+  - `_compute_shards()` computes adaptive sub-ranges.
+
+- **`src/client.py`** — `search_beatmapsets()` now accepts `sort`
+  (`BeatmapsetSearchSort` enum) and `exclude_ids` (set of IDs to skip).
+
+- **`main.py`** — wired to use `sweep_search()` instead of calling the client
+  directly.
+
+- **`verify_sweep.py`** — before/after comparison script: runs both
+  `single_sort_search()` and `sweep_search()` on a narrow 4.3–4.6★ mania
+  filter and prints unique-ID counts, overlap, and improvement percentage.
+
+### Verification
+
+Requires live osu! API credentials (`config.json`). Run:
+```bash
+python verify_sweep.py
+```
+Expected: sweep search finds significantly more unique beatmapsets than
+single-sort, especially on narrow star ranges where a single sort exhausts
+its pagination window.
+
+### Stubbed (intentionally, for later slices)
+
+- `src/pp.py` — PP calculation via `rosu-pp-py` (slice 3).
+- `gui.py` — PyQt6 GUI (slice 4).
