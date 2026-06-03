@@ -30,15 +30,31 @@ src/
   client.py       # osu! API v2 auth + beatmapset search (via ossapi)
   download.py     # .osz fetching via mirrors (catboy -> nerinyan)
   registry.py     # SQLite store of downloaded maps + dupe check
-  search.py       # STUB — robust search engine (slice 2)
+  search.py       # sort-sweep + star-shard search engine (slice 2)
   pp.py           # STUB — PP calc via rosu-pp-py (slice 3)
 main.py           # CLI entry point
 gui.py            # STUB — PyQt6 GUI (slice 4)
+verify_sweep.py   # before/after comparison script for search engine
 config.json       # REAL credentials — gitignored, never commit
 config.json.template
 registry.db       # SQLite registry — gitignored
 downloads/        # .osz output — gitignored
 ```
+
+## Search engine design (slice 2)
+
+The search engine in `search.py` solves the "ran dry" problem where the osu!
+API caps pagination depth per sort order. Two techniques combined:
+
+- **Sort-sweep:** Each search runs across 4 sort orders (`plays_desc`,
+  `ranked_desc`, `difficulty_desc`, `favourites_desc`) and unions the results.
+  Each sort surfaces a different slice of the matching pool.
+- **Star-range sharding:** Narrow ranges (e.g. 4.3–4.6★) are split into
+  ~0.2★ sub-ranges so each sub-range gets a full cursor window. Width adapts
+  based on overall range span.
+
+`client.py` accepts a `sort` parameter and `exclude_ids` for pre-filtering.
+`main.py` calls `sweep_search()` which orchestrates shard→sweep→union→dedup.
 
 ## CLI usage
 
@@ -58,8 +74,9 @@ then `pip install ossapi requests`.
 
 1. **Slice 1 (DONE):** Prove the end-to-end pipeline — scaffold, config, minimal
    search, mirror download, SQLite registry with dedup, CLI. ✅
-2. **Slice 2:** Robust search engine — full filter set, pagination/cursor
-   handling, keyword search, ranking. Built out in `search.py`.
+2. **Slice 2 (DONE):** Sort-sweep + star-shard search engine. Solves the
+   "ran dry" problem by sweeping 4 sort orders and sharding narrow star
+   ranges. Built in `search.py`, wired into `main.py`. ✅
 3. **Slice 3:** PP + full filters — `rosu-pp-py`, PP-range filtering. `pp.py`.
 4. **Slice 4:** GUI — PyQt6 desktop app. `gui.py`.
 

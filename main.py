@@ -1,4 +1,4 @@
-"""CLI entry point for osu-beatmap-fetcher (slice 1).
+"""CLI entry point for osu-beatmap-fetcher.
 
 Example:
     python main.py --stars 4-5 --count 5 --download
@@ -10,6 +10,7 @@ import sys
 from src.client import OsuClient
 from src.download import download_beatmapset, polite_delay, DownloadError
 from src.registry import Registry
+from src.search import sweep_search
 
 
 def parse_star_range(s: str) -> tuple[float, float]:
@@ -59,16 +60,16 @@ def main(argv=None):
     client = OsuClient()
     registry = Registry()
 
-    # Over-fetch a bit so that after skipping dupes we still have enough new
-    # ones to download.
-    hits = client.search_beatmapsets(
+    hits = sweep_search(
+        client=client,
+        registry=registry,
         star_min=star_min,
         star_max=star_max,
-        count=args.count * 3,
         mode=args.mode,
         category=args.status,
+        max_total=args.count * 3,
     )
-    print(f"Found {len(hits)} candidate beatmapsets.")
+    print(f"Found {len(hits)} candidate beatmapsets (after sweep + dedup).")
 
     downloaded = 0
     skipped = 0
@@ -85,7 +86,7 @@ def main(argv=None):
         label = f"{hit.id}  {hit.artist} - {hit.title} ({hit.stars:.2f}*)"
         if not args.download:
             print(f"  FOUND {label}")
-            downloaded += 1  # count toward --count for a dry run
+            downloaded += 1
             continue
 
         try:
