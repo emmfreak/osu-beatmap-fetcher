@@ -14,6 +14,7 @@ each difficulty is only ever calculated once.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -24,7 +25,7 @@ from .registry import Registry
 
 OSU_CACHE_DIR = Path(__file__).resolve().parent.parent / ".osu_cache"
 _HEADERS = {"User-Agent": "osu-beatmap-fetcher/0.3 (slice3)"}
-FETCH_DELAY = 0.3
+FETCH_DELAY = 0.15
 
 _MODE_MAP = {
     0: rosu.GameMode.Osu,
@@ -32,6 +33,9 @@ _MODE_MAP = {
     2: rosu.GameMode.Catch,
     3: rosu.GameMode.Mania,
 }
+
+WORKERS = 8
+BATCH_SIZE = 8
 
 
 def fetch_osu_file(beatmap_id: int) -> Path:
@@ -79,49 +83,145 @@ def compute_pp_cached(beatmap_id: int, mode_int: int, registry: Registry) -> flo
     return pp
 
 
+def _pp_in_range(pp: float, pp_min: float | None, pp_max: float | None) -> bool:
+    if pp_min is not None and pp < pp_min:
+        return False
+    if pp_max is not None and pp > pp_max:
+        return False
+    return True
+
+
+def _load_pp_cache(registry: Registry) -> dict[int, float]:
+    """Bulk-load all cached PP values into a dict for thread-safe reads."""
+    cur = registry.conn.execute("SELECT beatmap_id, max_pp FROM pp_cache")
+    return {row["beatmap_id"]: row["max_pp"] for row in cur.fetchall()}
+
+
+def _fetch_and_compute(beatmap_id: int, mode_int: int) -> tuple[int, float]:
+    """Fetch .osu file and compute PP. Designed for thread-pool use."""
+    pp = compute_max_pp(beatmap_id, mode_int)
+    return beatmap_id, pp
+
+
 def filter_by_pp(
     candidates: list[BeatmapsetHit],
     pp_min: float | None,
     pp_max: float | None,
     registry: Registry,
+    target_count: int | None = None,
 ) -> list[BeatmapsetHit]:
     """Filter beatmapset candidates by PP range.
 
     For each candidate, computes PP for its matching beatmaps (difficulties).
     A set passes if at least one difficulty has PP in [pp_min, pp_max].
-    Returns a new list of passing sets (with beatmaps narrowed to matches).
+
+    Optimisations over the naive approach:
+    - Early termination: stops once target_count sets have passed.
+    - Parallel fetch: .osu downloads + PP calc run in a thread pool.
+    - Per-set short-circuit: skips remaining diffs once one passes.
     """
     if pp_min is None and pp_max is None:
         return candidates
 
+    pp_cache = _load_pp_cache(registry)
     passed: list[BeatmapsetHit] = []
     total = len(candidates)
 
-    for i, hit in enumerate(candidates):
-        print(f"  PP calc {i + 1}/{total}: {hit.artist} - {hit.title} ...", end="", flush=True)
-        matching_bms: list[BeatmapInfo] = []
-        for bm in hit.beatmaps:
-            try:
-                pp = compute_pp_cached(bm.id, bm.mode_int, registry)
-            except Exception as e:
-                print(f" [err:{e}]", end="")
-                continue
-            if pp_min is not None and pp < pp_min:
-                continue
-            if pp_max is not None and pp > pp_max:
-                continue
-            matching_bms.append(bm)
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for batch_start in range(0, total, BATCH_SIZE):
+            if target_count is not None and len(passed) >= target_count:
+                break
 
-        if matching_bms:
-            print(f" PASS ({len(matching_bms)} diffs)")
-            passed.append(BeatmapsetHit(
-                id=hit.id,
-                artist=hit.artist,
-                title=hit.title,
-                stars=max(b.difficulty_rating for b in matching_bms),
-                beatmaps=matching_bms,
-            ))
-        else:
-            print(" skip")
+            batch = candidates[batch_start:batch_start + BATCH_SIZE]
+
+            # Phase 1: resolve sets from cache; collect uncached beatmaps
+            resolved: dict[int, list[BeatmapInfo] | None] = {}
+            futures: dict = {}
+
+            for bi, hit in enumerate(batch):
+                passed_from_cache = False
+                uncached = []
+
+                for bm in hit.beatmaps:
+                    if bm.id in pp_cache:
+                        if _pp_in_range(pp_cache[bm.id], pp_min, pp_max):
+                            resolved[bi] = [bm]
+                            passed_from_cache = True
+                            break
+                    else:
+                        uncached.append(bm)
+
+                if passed_from_cache:
+                    continue
+
+                all_cached = len(uncached) == 0
+                if all_cached:
+                    resolved[bi] = None
+                else:
+                    for bm in uncached:
+                        fut = pool.submit(_fetch_and_compute, bm.id, bm.mode_int)
+                        futures[fut] = (bi, bm)
+
+            # Phase 2: collect parallel results
+            for fut in as_completed(futures):
+                bi, bm = futures[fut]
+                try:
+                    bm_id, pp = fut.result()
+                    pp_cache[bm_id] = pp
+                    registry.cache_pp(bm_id, pp)
+                except Exception:
+                    pass
+
+            # Phase 3: evaluate each set in the batch
+            for bi, hit in enumerate(batch):
+                idx = batch_start + bi + 1
+
+                if bi in resolved:
+                    matching = resolved[bi]
+                    if matching is not None:
+                        bm = matching[0]
+                        pp_val = pp_cache[bm.id]
+                        print(f"  PP check {idx}/{total}: {hit.artist} - {hit.title}"
+                              f" — {pp_val:.0f}pp PASS")
+                        passed.append(BeatmapsetHit(
+                            id=hit.id, artist=hit.artist, title=hit.title,
+                            stars=bm.difficulty_rating, beatmaps=matching,
+                        ))
+                    else:
+                        best = max((pp_cache.get(bm.id, 0) for bm in hit.beatmaps),
+                                   default=0)
+                        print(f"  PP check {idx}/{total}: {hit.artist} - {hit.title}"
+                              f" — {best:.0f}pp skip")
+                else:
+                    # Was unresolved — check fetched results
+                    first_match = None
+                    for bm in hit.beatmaps:
+                        pp = pp_cache.get(bm.id)
+                        if pp is not None and _pp_in_range(pp, pp_min, pp_max):
+                            first_match = bm
+                            break
+
+                    if first_match is not None:
+                        pp_val = pp_cache[first_match.id]
+                        print(f"  PP check {idx}/{total}: {hit.artist} - {hit.title}"
+                              f" — {pp_val:.0f}pp PASS")
+                        passed.append(BeatmapsetHit(
+                            id=hit.id, artist=hit.artist, title=hit.title,
+                            stars=first_match.difficulty_rating,
+                            beatmaps=[first_match],
+                        ))
+                    else:
+                        best = max((pp_cache.get(bm.id, 0) for bm in hit.beatmaps),
+                                   default=0)
+                        print(f"  PP check {idx}/{total}: {hit.artist} - {hit.title}"
+                              f" — {best:.0f}pp skip")
+
+    if target_count is not None:
+        passed = passed[:target_count]
+
+    checked = min(batch_start + BATCH_SIZE, total) if total > 0 else 0
+    if target_count is not None and checked < total:
+        print(f"  (early termination: {len(passed)} passed after checking"
+              f" {checked}/{total} sets)")
 
     return passed

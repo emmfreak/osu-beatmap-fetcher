@@ -144,7 +144,8 @@ def main(argv=None):
 
     if pp_min is not None or pp_max is not None:
         print(f"Applying PP filter ({pp_min or '?'}-{pp_max or '?'} max SS PP)...")
-        hits = filter_by_pp(hits, pp_min, pp_max, registry)
+        hits = filter_by_pp(hits, pp_min, pp_max, registry,
+                            target_count=args.count)
         print(f"{len(hits)} beatmapsets passed PP filter.")
 
     downloaded = 0
