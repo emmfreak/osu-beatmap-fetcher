@@ -178,3 +178,51 @@ a future `classifier.py` could feed candidate IDs into the same pipeline.
 ### Stubbed (intentionally, for later slices)
 
 - `gui.py` — PyQt6 GUI (slice 4).
+
+---
+
+## PP-filter performance fix ✅ (complete)
+
+### Problem solved
+
+With `--pp` and `--count 50`, the filter computed PP for the entire candidate
+pool (~500 maps) sequentially, each requiring a `.osu` fetch (~1-2s). Total
+wall time: 10-20 minutes. An identical rerun was fast (SQLite cache), but the
+first run was painful.
+
+### Delivered
+
+Three optimisations in `src/pp.py`:
+
+1. **Early termination:** `filter_by_pp` now accepts `target_count` and stops
+   processing batches once that many sets have passed. `main.py` passes
+   `args.count` as the target. A count=50 query stops after ~50-80 sets
+   instead of checking all 500.
+
+2. **Parallel `.osu` fetch + PP calc:** uses `concurrent.futures.ThreadPoolExecutor`
+   with 8 workers, processing candidates in batches of 8 sets. Cached diffs
+   resolve instantly (no thread pool needed); only uncached diffs hit the
+   network. Effective concurrency is capped at 8 connections — polite to
+   `osu.ppy.sh`. Per-fetch delay reduced from 0.3s to 0.15s.
+
+3. **Per-set short-circuit:** once any difficulty in a set passes the PP range,
+   remaining diffs for that set are skipped. Cache-resolved sets bypass the
+   thread pool entirely.
+
+Also: each map's computed PP is now printed next to "PASS" / "skip" for
+visibility (e.g. `— 342pp PASS`).
+
+### Expected behaviour
+
+- **First run** (`--pp 300-500 --count 50`): checks far fewer than 500 maps
+  (early termination) and fetches `.osu` files ~8× faster (parallelism).
+  Wall time drops from 10-20 min to 1-3 min depending on cache hit rate.
+- **Identical rerun:** near-instant — all PP values served from SQLite cache,
+  no network I/O.
+
+### Files changed
+
+- `src/pp.py` — rewrote `filter_by_pp` with all three optimisations; added
+  `_pp_in_range`, `_load_pp_cache`, `_fetch_and_compute` helpers.
+- `main.py` — passes `target_count=args.count` to `filter_by_pp`.
+- `CLAUDE.md` — documented PP filter performance design.

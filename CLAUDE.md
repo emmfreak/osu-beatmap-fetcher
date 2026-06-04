@@ -96,6 +96,17 @@ the filter checks individual difficulties matching your key count and star range
 `.osu` files are fetched from `osu.ppy.sh` and cached locally (`.osu_cache/`).
 Computed PP is cached in SQLite so each difficulty is calculated once.
 
+**Performance:** `filter_by_pp` uses three optimisations to avoid the
+O(all-candidates) cost:
+- **Early termination:** accepts `target_count` and stops once that many sets
+  pass, instead of evaluating the entire pool.
+- **Parallel fetch:** `.osu` downloads and PP computation run in a thread pool
+  (8 workers, batches of 8 sets). Concurrency is the rate limiter — polite to
+  `osu.ppy.sh` without per-request sleeps dominating wall time.
+- **Per-set short-circuit:** once any difficulty in a set passes the PP range,
+  remaining diffs are skipped (cache-resolved sets skip the thread pool
+  entirely).
+
 ## The 4-slice plan
 
 1. **Slice 1 (DONE):** Prove the end-to-end pipeline — scaffold, config, minimal
