@@ -410,43 +410,37 @@ class MainWindow(QMainWindow):
 
         # BPM
         grid.addWidget(QLabel("BPM min:"), row, 0)
-        self.bpm_min = QSpinBox()
-        self.bpm_min.setRange(0, 9999)
-        self.bpm_min.setSpecialValueText("—")
+        self.bpm_min = QLineEdit()
+        self.bpm_min.setPlaceholderText("any")
         grid.addWidget(self.bpm_min, row, 1)
 
         grid.addWidget(QLabel("BPM max:"), row, 2)
-        self.bpm_max = QSpinBox()
-        self.bpm_max.setRange(0, 9999)
-        self.bpm_max.setSpecialValueText("—")
+        self.bpm_max = QLineEdit()
+        self.bpm_max.setPlaceholderText("any")
         grid.addWidget(self.bpm_max, row, 3)
         row += 1
 
         # Length
         grid.addWidget(QLabel("Length min (s):"), row, 0)
-        self.length_min = QSpinBox()
-        self.length_min.setRange(0, 99999)
-        self.length_min.setSpecialValueText("—")
+        self.length_min = QLineEdit()
+        self.length_min.setPlaceholderText("any")
         grid.addWidget(self.length_min, row, 1)
 
         grid.addWidget(QLabel("Length max (s):"), row, 2)
-        self.length_max = QSpinBox()
-        self.length_max.setRange(0, 99999)
-        self.length_max.setSpecialValueText("—")
+        self.length_max = QLineEdit()
+        self.length_max.setPlaceholderText("any")
         grid.addWidget(self.length_max, row, 3)
         row += 1
 
         # PP
         grid.addWidget(QLabel("PP min:"), row, 0)
-        self.pp_min = QSpinBox()
-        self.pp_min.setRange(0, 99999)
-        self.pp_min.setSpecialValueText("—")
+        self.pp_min = QLineEdit()
+        self.pp_min.setPlaceholderText("any")
         grid.addWidget(self.pp_min, row, 1)
 
         grid.addWidget(QLabel("PP max:"), row, 2)
-        self.pp_max = QSpinBox()
-        self.pp_max.setRange(0, 99999)
-        self.pp_max.setSpecialValueText("—")
+        self.pp_max = QLineEdit()
+        self.pp_max.setPlaceholderText("any")
         grid.addWidget(self.pp_max, row, 3)
         row += 1
 
@@ -563,18 +557,20 @@ class MainWindow(QMainWindow):
         if keys_text != "Any" and params["mode"] == "mania":
             params["keys"] = int(keys_text.replace("K", ""))
 
-        if self.bpm_min.value() > 0:
-            params["bpm_min"] = float(self.bpm_min.value())
-        if self.bpm_max.value() > 0:
-            params["bpm_max"] = float(self.bpm_max.value())
-        if self.length_min.value() > 0:
-            params["length_min"] = self.length_min.value()
-        if self.length_max.value() > 0:
-            params["length_max"] = self.length_max.value()
-        if self.pp_min.value() > 0:
-            params["pp_min"] = float(self.pp_min.value())
-        if self.pp_max.value() > 0:
-            params["pp_max"] = float(self.pp_max.value())
+        for attr, key, as_int in [
+            (self.bpm_min, "bpm_min", False),
+            (self.bpm_max, "bpm_max", False),
+            (self.length_min, "length_min", True),
+            (self.length_max, "length_max", True),
+            (self.pp_min, "pp_min", False),
+            (self.pp_max, "pp_max", False),
+        ]:
+            text = attr.text().strip()
+            if text:
+                try:
+                    params[key] = int(text) if as_int else float(text)
+                except ValueError:
+                    pass
 
         keyword = self.keyword_input.text().strip()
         if keyword:
