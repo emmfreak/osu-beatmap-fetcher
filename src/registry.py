@@ -30,6 +30,15 @@ class Registry:
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pp_cache (
+                beatmap_id  INTEGER PRIMARY KEY,
+                max_pp      REAL NOT NULL,
+                computed_at TEXT NOT NULL
+            )
+            """
+        )
         self.conn.commit()
 
     def is_downloaded(self, beatmapset_id: int) -> bool:
@@ -64,6 +73,23 @@ class Registry:
     def count(self) -> int:
         cur = self.conn.execute("SELECT COUNT(*) AS n FROM downloads")
         return cur.fetchone()["n"]
+
+    def get_cached_pp(self, beatmap_id: int) -> float | None:
+        cur = self.conn.execute(
+            "SELECT max_pp FROM pp_cache WHERE beatmap_id = ?", (beatmap_id,)
+        )
+        row = cur.fetchone()
+        return row["max_pp"] if row else None
+
+    def cache_pp(self, beatmap_id: int, max_pp: float):
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO pp_cache (beatmap_id, max_pp, computed_at)
+            VALUES (?, ?, ?)
+            """,
+            (beatmap_id, max_pp, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()

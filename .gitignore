@@ -5,6 +5,9 @@ config.json
 downloads/
 songs/
 
+# Cached .osu files for PP calc
+.osu_cache/
+
 # SQLite registry
 *.db
 *.sqlite

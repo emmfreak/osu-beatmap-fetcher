@@ -52,6 +52,12 @@ def sweep_search(
     mode: str = "mania",
     category: str = "ranked",
     max_total: int = 500,
+    keys: int | None = None,
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
+    length_min: int | None = None,
+    length_max: int | None = None,
+    keyword: str | None = None,
 ) -> list[BeatmapsetHit]:
     """Run a full shard + sort-sweep search, returning deduplicated hits.
 
@@ -80,6 +86,12 @@ def sweep_search(
                 category=category,
                 sort=sort,
                 exclude_ids=exclude,
+                keys=keys,
+                bpm_min=bpm_min,
+                bpm_max=bpm_max,
+                length_min=length_min,
+                length_max=length_max,
+                keyword=keyword,
             )
             for h in hits:
                 if h.id not in pool and h.id not in registry_ids:
