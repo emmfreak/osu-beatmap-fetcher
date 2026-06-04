@@ -226,3 +226,85 @@ visibility (e.g. `— 342pp PASS`).
   `_pp_in_range`, `_load_pp_cache`, `_fetch_and_compute` helpers.
 - `main.py` — passes `target_count=args.count` to `filter_by_pp`.
 - `CLAUDE.md` — documented PP filter performance design.
+
+---
+
+## Slice 4 — PyQt6 GUI ✅ (complete)
+
+### Problem solved
+
+The tool was CLI-only. Users needed a desktop GUI for discovering and
+downloading beatmaps without memorising command-line flags.
+
+### Delivered
+
+- **`gui.py`** — full PyQt6 desktop application (~420 lines), dark theme with
+  osu! accent colours (pink `#FF66AA`, purple `#8866CC`).
+
+- **All filter controls** mapping directly to engine parameters:
+  - Mode selector (Standard / Mania / Taiko / Catch)
+  - Key count selector (Any / 4K / 7K) — auto-disabled for non-mania modes
+  - Star rating min/max with decimal precision
+  - BPM range (min/max)
+  - Length range in seconds (min/max)
+  - PP filter min/max
+  - Keyword box with explanatory hint about tag-based matching
+  - Count spinner (1–500)
+
+- **Search/preview workflow:** Search button runs the full sweep engine and
+  shows matched maps in a table before downloading. Users select rows, then
+  click Download.
+
+- **Background workers (QThread):** both search+PP and download run on
+  background threads — the UI never freezes.
+  - `SearchWorker`: runs `sweep_search()` + `filter_by_pp()` with live
+    progress updates ("PP check: 23/200 sets checked, 5 passed").
+  - `DownloadWorker`: downloads `.osz` files with per-file progress and
+    polite delays between downloads.
+
+- **Live progress:** progress bar updates during PP filtering (determinate,
+  showing checked/total) and downloads. Status bar shows current operation.
+
+- **Cancel button:** aborts an in-progress search or download cleanly via a
+  thread-safe cancelled flag checked at each batch boundary.
+
+- **Engine reuse:** the GUI calls the exact same functions as the CLI
+  (`sweep_search`, `filter_by_pp`, `download_beatmapset`, `Registry`) — zero
+  duplicated logic.
+
+### How it was verified
+
+1. **GUI launch + widget tests:** all controls instantiate correctly; mode
+   switching enables/disables keys selector; parameter gathering produces
+   correct dict; zero-value spinners are excluded; star range auto-swaps
+   when min > max.
+2. **Table population:** mock beatmapset hits render correctly in the results
+   table with proper column values.
+3. **Worker instantiation:** `SearchWorker` and `DownloadWorker` can be created
+   and cancelled.
+4. **Visual verification:** screenshot confirms dark theme, osu! accent colours,
+   clean layout with all controls, results table, and progress area.
+5. **No API credentials** in this environment, so live end-to-end was not tested.
+   The user should verify with:
+   ```bash
+   python gui.py
+   ```
+   Then: set mode=mania, keys=4K, stars 4–5, keyword "jumpstream", count 5,
+   click Search, preview results, click Download.
+
+### Architecture note
+
+The GUI is intentionally a thin layer — `gui.py` imports and calls the same
+`src/` modules as `main.py`. No search, filter, download, or registry logic
+lives in the GUI code. This means CLI and GUI always produce identical results
+and share the same SQLite registry / PP cache.
+
+---
+
+## Project status: FEATURE-COMPLETE
+
+All 4 slices delivered:
+1. ✅ Pipeline scaffold (config, auth, search, mirror download, SQLite registry)
+2. ✅ Sort-sweep + star-shard search engine
+3. ✅ Full filters (keys, BPM, length, PP, keyword)
+4. ✅ PyQt6 GUI

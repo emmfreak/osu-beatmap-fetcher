@@ -116,6 +116,7 @@ O(all-candidates) cost:
    ranges. Built in `search.py`, wired into `main.py`. ✅
 3. **Slice 3 (DONE):** Full filters (keys, BPM, length), PP calc + filter via
    `rosu-pp-py`, keyword/pattern search via API `q` param. ✅
-4. **Slice 4:** GUI — PyQt6 desktop app. `gui.py`.
+4. **Slice 4 (DONE):** GUI — PyQt6 desktop app with dark osu!-themed UI,
+   all filter controls, background workers, live progress, and cancel. ✅
 
-See `PROGRESS.md` for current state.
+**Project is feature-complete.** See `PROGRESS.md` for full history.
