@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from src.client import OsuClient
-from src.download import download_beatmapset, polite_delay, DownloadError
+from src.download import download_beatmapset, download_beatmapsets_parallel, polite_delay, DownloadError
 from src.registry import Registry
 from src.search import sweep_search
 from src.pp import filter_by_pp
@@ -150,8 +150,11 @@ def main(argv=None):
 
     downloaded = 0
     skipped = 0
+    to_download = []
+    hit_by_id = {}
+
     for hit in hits:
-        if downloaded >= args.count:
+        if downloaded + len(to_download) >= args.count:
             break
 
         if registry.is_downloaded(hit.id):
@@ -166,18 +169,25 @@ def main(argv=None):
             downloaded += 1
             continue
 
-        try:
-            path = download_beatmapset(hit.id)
-        except DownloadError as e:
-            print(f"  FAIL  {label}: {e}")
-            continue
+        to_download.append(hit.id)
+        hit_by_id[hit.id] = hit
 
-        registry.record(hit.id, stars=hit.stars,
-                         artist=hit.artist, title=hit.title)
-        size_kb = path.stat().st_size / 1024
-        print(f"  GOT   {label} -> {path.name} ({size_kb:.0f} KB)")
-        downloaded += 1
-        polite_delay()
+    if to_download:
+        def on_result(result):
+            hit = hit_by_id[result.beatmapset_id]
+            label = f"{hit.id}  {hit.artist} - {hit.title} ({hit.stars:.2f}*)"
+            if result.ok:
+                registry.record(hit.id, stars=hit.stars,
+                                artist=hit.artist, title=hit.title)
+                size_kb = result.path.stat().st_size / 1024
+                print(f"  GOT   {label} -> {result.path.name} ({size_kb:.0f} KB)")
+            else:
+                print(f"  FAIL  {label}: {result.error}")
+
+        print(f"Downloading {len(to_download)} maps ({DOWNLOAD_WORKERS} parallel)...")
+        from src.download import DOWNLOAD_WORKERS
+        results = download_beatmapsets_parallel(to_download, on_result=on_result)
+        downloaded = sum(1 for r in results if r.ok)
 
     action = "downloaded" if args.download else "listed"
     print(f"\nDone. {action} {downloaded}, skipped {skipped} dupes. "
