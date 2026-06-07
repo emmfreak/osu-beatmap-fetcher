@@ -186,6 +186,7 @@ def filter_by_pp(
                         passed.append(BeatmapsetHit(
                             id=hit.id, artist=hit.artist, title=hit.title,
                             stars=bm.difficulty_rating, beatmaps=matching,
+                            cover_url=hit.cover_url, creator=hit.creator,
                         ))
                     else:
                         best = max((pp_cache.get(bm.id, 0) for bm in hit.beatmaps),
@@ -209,6 +210,7 @@ def filter_by_pp(
                             id=hit.id, artist=hit.artist, title=hit.title,
                             stars=first_match.difficulty_rating,
                             beatmaps=[first_match],
+                            cover_url=hit.cover_url, creator=hit.creator,
                         ))
                     else:
                         best = max((pp_cache.get(bm.id, 0) for bm in hit.beatmaps),

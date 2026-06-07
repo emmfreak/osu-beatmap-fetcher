@@ -38,6 +38,8 @@ class BeatmapsetHit:
     title: str
     stars: float
     beatmaps: list[BeatmapInfo] = field(default_factory=list)
+    cover_url: str = ""
+    creator: str = ""
 
 
 # Map a short mode string to the ossapi enum.
@@ -144,6 +146,12 @@ class OsuClient:
                 if not matching_bms:
                     continue
 
+                cover_url = ""
+                if hasattr(bset, "covers") and bset.covers:
+                    cover_url = getattr(bset.covers, "list", "") or ""
+                    if not cover_url:
+                        cover_url = getattr(bset.covers, "card", "") or ""
+
                 seen.add(bset.id)
                 hits.append(
                     BeatmapsetHit(
@@ -152,6 +160,8 @@ class OsuClient:
                         title=bset.title,
                         stars=max(b.difficulty_rating for b in matching_bms),
                         beatmaps=matching_bms,
+                        cover_url=cover_url,
+                        creator=getattr(bset, "creator", ""),
                     )
                 )
                 if len(hits) >= count:
