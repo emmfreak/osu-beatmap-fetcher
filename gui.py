@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.client import OsuClient, BeatmapsetHit
-from src.download import download_beatmapset, polite_delay, DownloadError
+from src.download import download_beatmapset, download_beatmapsets_parallel, DownloadResult, DownloadError
 from src.registry import Registry
 from src.search import sweep_search
 from src.pp import filter_by_pp
@@ -298,7 +298,7 @@ class SearchWorker(QThread):
 
 
 class DownloadWorker(QThread):
-    """Downloads .osz files on a background thread."""
+    """Downloads .osz files on a background thread using parallel workers."""
     progress = pyqtSignal(int, int, str)
     single_done = pyqtSignal(int, str)
     error_single = pyqtSignal(int, str)
@@ -316,30 +316,45 @@ class DownloadWorker(QThread):
         registry = Registry()
         downloaded = 0
         skipped = 0
+        completed = 0
 
-        for i, hit in enumerate(self.hits):
-            if self._cancelled:
-                break
-
+        hit_by_id = {}
+        to_download = []
+        for hit in self.hits:
             if registry.is_downloaded(hit.id):
                 skipped += 1
-                self.progress.emit(i + 1, len(self.hits),
+                completed += 1
+                self.progress.emit(completed, len(self.hits),
                                    f"Skipped (dupe): {hit.artist} - {hit.title}")
-                continue
+            else:
+                to_download.append(hit.id)
+                hit_by_id[hit.id] = hit
 
-            self.progress.emit(i + 1, len(self.hits),
-                               f"Downloading: {hit.artist} - {hit.title}")
-            try:
-                path = download_beatmapset(hit.id)
+        def on_result(result: DownloadResult):
+            nonlocal downloaded, completed
+            hit = hit_by_id[result.beatmapset_id]
+            completed += 1
+            if result.ok:
                 registry.record(hit.id, stars=hit.stars,
                                 artist=hit.artist, title=hit.title)
-                size_kb = path.stat().st_size / 1024
+                size_kb = result.path.stat().st_size / 1024
                 downloaded += 1
-                self.single_done.emit(hit.id, f"{path.name} ({size_kb:.0f} KB)")
-                if i < len(self.hits) - 1:
-                    polite_delay()
-            except DownloadError as e:
-                self.error_single.emit(hit.id, str(e))
+                self.single_done.emit(hit.id, f"{result.path.name} ({size_kb:.0f} KB)")
+                self.progress.emit(completed, len(self.hits),
+                                   f"Downloaded: {hit.artist} - {hit.title}")
+            else:
+                self.error_single.emit(hit.id, result.error)
+                self.progress.emit(completed, len(self.hits),
+                                   f"Failed: {hit.artist} - {hit.title}")
+
+        if to_download:
+            self.progress.emit(completed, len(self.hits),
+                               f"Downloading {len(to_download)} maps (parallel)...")
+            download_beatmapsets_parallel(
+                to_download,
+                on_result=on_result,
+                cancelled=lambda: self._cancelled,
+            )
 
         registry.close()
         self.finished.emit(downloaded, skipped)

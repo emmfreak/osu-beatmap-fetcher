@@ -6,26 +6,39 @@ files from a public mirror instead. Mirrors are tried in order.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import requests
 
 DEFAULT_DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "downloads"
 
-# Mirror .osz endpoints, tried in order. {id} is the beatmapset id.
 MIRRORS = [
     ("catboy", "https://catboy.best/d/{id}"),
     ("nerinyan", "https://api.nerinyan.moe/d/{id}"),
 ]
 
-# Polite delay between downloads (seconds).
-DOWNLOAD_DELAY = 2.0
+DOWNLOAD_DELAY = 0.5
+DOWNLOAD_WORKERS = 4
 
 _HEADERS = {"User-Agent": "osu-beatmap-fetcher/0.1 (slice1)"}
 
 
 class DownloadError(Exception):
     pass
+
+
+@dataclass
+class DownloadResult:
+    beatmapset_id: int
+    path: Path | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.path is not None
 
 
 def download_beatmapset(
@@ -52,7 +65,6 @@ def download_beatmapset(
 
             content_type = resp.headers.get("Content-Type", "")
             if "application/json" in content_type or "text/html" in content_type:
-                # Mirror returned an error page, not an archive.
                 raise DownloadError(
                     f"{name} returned non-archive content ({content_type})"
                 )
@@ -69,12 +81,45 @@ def download_beatmapset(
         except (requests.RequestException, DownloadError) as e:
             last_err = e
             if out_path.exists():
-                out_path.unlink()  # clean up a partial/bad file
+                out_path.unlink()
             continue
 
     raise DownloadError(
         f"All mirrors failed for beatmapset {beatmapset_id}: {last_err}"
     )
+
+
+def _download_one(beatmapset_id: int, dest_dir: Path) -> DownloadResult:
+    try:
+        path = download_beatmapset(beatmapset_id, dest_dir=dest_dir)
+        time.sleep(DOWNLOAD_DELAY)
+        return DownloadResult(beatmapset_id=beatmapset_id, path=path)
+    except DownloadError as e:
+        return DownloadResult(beatmapset_id=beatmapset_id, error=str(e))
+
+
+def download_beatmapsets_parallel(
+    beatmapset_ids: list[int],
+    dest_dir: Path = DEFAULT_DOWNLOAD_DIR,
+    on_result: Callable[[DownloadResult], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[DownloadResult]:
+    """Download multiple .osz files concurrently. Returns results in completion order."""
+    results: list[DownloadResult] = []
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+        futures = {
+            pool.submit(_download_one, bsid, dest_dir): bsid
+            for bsid in beatmapset_ids
+        }
+        for fut in as_completed(futures):
+            if cancelled and cancelled():
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
+            result = fut.result()
+            results.append(result)
+            if on_result:
+                on_result(result)
+    return results
 
 
 def polite_delay():
