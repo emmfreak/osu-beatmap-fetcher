@@ -5,24 +5,53 @@ lazer-client-only and returns 403 for normal OAuth apps, so we fetch .osz
 files from a public mirror instead. Mirrors are tried in order.
 """
 
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 import requests
 
-DEFAULT_DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "downloads"
+# Repo root (one level up from src/) — same base dir the registry.db lives in.
+_BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_DOWNLOAD_DIR = _BASE_DIR / "downloads"
 
+# Durable record of downloads that failed on every mirror. Lives next to
+# registry.db so it survives the GUI closing and doesn't depend on the cwd.
+FAILED_LOG_PATH = _BASE_DIR / "failed_downloads.log"
+_failed_log_lock = threading.Lock()
+
+# Download mirrors, tried in order until one serves a valid .osz. A single
+# mirror going dark (or missing a specific map) just fails over to the next.
+# URL patterns verified against real beatmapset ids with diagnose_mirrors.py;
+# no-video variants are preferred where the mirror supports one so file sizes
+# stay consistent across mirrors:
+#   - osu.direct  ?noVideo=1        (true no-video, sends Content-Length)
+#   - nerinyan    ?nv=1             (no-video; chunked, occasional rate-limit stub)
+#   - sayobot     /novideo/{id}     (no-video; byte-for-byte match to osu.direct)
+#   - beatconnect /b/{id}           (valid osz; rate-limits aggressively -> low)
+#   - catboy      /d/{id}           (standard endpoint; currently down 502, kept
+#                                    as fail-over — a dead mirror just cascades)
 MIRRORS = [
-    ("catboy", "https://catboy.best/d/{id}"),
-    ("nerinyan", "https://api.nerinyan.moe/d/{id}"),
+    ("osu.direct",  "https://osu.direct/api/d/{id}?noVideo=1"),
+    ("nerinyan",    "https://api.nerinyan.moe/d/{id}?nv=1"),
+    ("sayobot",     "https://dl.sayobot.cn/beatmaps/download/novideo/{id}"),
+    ("beatconnect", "https://beatconnect.io/b/{id}"),
+    ("catboy",      "https://catboy.best/d/{id}"),
 ]
 
 DOWNLOAD_DELAY = 0.5
 DOWNLOAD_WORKERS = 4
+
+# Per-mirror retry: a transient failure (timeout, connection error, 429, 5xx)
+# gets ONE retry against the same mirror after a short backoff before failing
+# over. A clean 404 / non-archive body is not retried — that mirror simply
+# doesn't have this map, so move on immediately.
+MIRROR_RETRY_BACKOFF = 1.0
 
 # A real .osz is a ZIP holding at least a .osu file; anything much smaller than
 # this is a truncated stream or an error/placeholder stub, never a real map.
@@ -64,6 +93,70 @@ class DownloadResult:
         return self.path is not None
 
 
+class _MirrorAttemptError(Exception):
+    """One mirror attempt failed.
+
+    ``transient`` marks retryable failures (timeout, connection error, HTTP 429
+    or 5xx) that get one retry against the same mirror; definitive failures
+    (404, non-archive body, corrupt/stub .osz) are not retried — that mirror
+    just doesn't have a good copy, so we cascade to the next one immediately.
+    """
+
+    def __init__(self, message: str, transient: bool):
+        super().__init__(message)
+        self.transient = transient
+
+
+def _fetch_from_mirror(name: str, url: str, out_path: Path, timeout: int) -> None:
+    """Download and validate one .osz from one mirror URL into ``out_path``.
+
+    Returns on success (``out_path`` holds a valid .osz); otherwise raises
+    ``_MirrorAttemptError`` with its transient/definitive classification.
+    """
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=timeout, stream=True)
+    except requests.Timeout:
+        raise _MirrorAttemptError(f"{name}: request timed out", transient=True)
+    except requests.RequestException as e:
+        raise _MirrorAttemptError(
+            f"{name}: connection error ({type(e).__name__})", transient=True
+        )
+
+    try:
+        status = resp.status_code
+        if status != 200:
+            # 429 / 5xx are transient (rate-limit or server hiccup); a 404 or
+            # other 4xx means this mirror hasn't got the map — don't retry it.
+            transient = status == 429 or 500 <= status < 600
+            raise _MirrorAttemptError(f"{name}: HTTP {status}", transient=transient)
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" in content_type or "text/html" in content_type:
+            raise _MirrorAttemptError(
+                f"{name}: non-archive content ({content_type})", transient=False
+            )
+
+        try:
+            with out_path.open("wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        except requests.RequestException as e:
+            raise _MirrorAttemptError(
+                f"{name}: dropped mid-download ({type(e).__name__})", transient=True
+            )
+    finally:
+        resp.close()
+
+    # Reject empty/truncated/stub responses so we fail over instead of saving
+    # junk osu! can't import (e.g. nerinyan's occasional rate-limit stub).
+    if not is_valid_osz(out_path):
+        size = out_path.stat().st_size if out_path.exists() else 0
+        raise _MirrorAttemptError(
+            f"{name}: invalid or corrupt .osz ({size} bytes)", transient=False
+        )
+
+
 def download_beatmapset(
     beatmapset_id: int,
     dest_dir: Path = DEFAULT_DOWNLOAD_DIR,
@@ -71,50 +164,31 @@ def download_beatmapset(
 ) -> Path:
     """Fetch the .osz for `beatmapset_id` and save it. Returns the file path.
 
-    Tries each mirror in turn; raises DownloadError if all fail.
+    Tries each mirror in order, with one retry per mirror on a transient
+    failure; raises DownloadError only if every mirror fails.
     """
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     out_path = dest_dir / f"{beatmapset_id}.osz"
 
-    last_err = None
+    errors: list[str] = []
     for name, template in MIRRORS:
         url = template.format(id=beatmapset_id)
-        try:
-            resp = requests.get(
-                url, headers=_HEADERS, timeout=timeout, stream=True
-            )
-            resp.raise_for_status()
-
-            content_type = resp.headers.get("Content-Type", "")
-            if "application/json" in content_type or "text/html" in content_type:
-                raise DownloadError(
-                    f"{name} returned non-archive content ({content_type})"
-                )
-
-            with out_path.open("wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-
-            # Reject empty/truncated/stub responses that aren't a real archive
-            # so we fall through to the next mirror instead of saving junk that
-            # osu! can't import.
-            if not is_valid_osz(out_path):
-                raise DownloadError(
-                    f"{name} returned an invalid or corrupt .osz "
-                    f"({out_path.stat().st_size} bytes)"
-                )
-
-            return out_path
-        except (requests.RequestException, DownloadError) as e:
-            last_err = e
-            if out_path.exists():
-                out_path.unlink()
-            continue
+        for attempt in range(2):  # initial try + up to one retry on transient
+            try:
+                _fetch_from_mirror(name, url, out_path, timeout)
+                return out_path
+            except _MirrorAttemptError as e:
+                if out_path.exists():
+                    out_path.unlink()
+                if e.transient and attempt == 0:
+                    time.sleep(MIRROR_RETRY_BACKOFF)
+                    continue  # retry this same mirror once before failing over
+                errors.append(str(e))
+                break  # give up on this mirror, cascade to the next
 
     raise DownloadError(
-        f"All mirrors failed for beatmapset {beatmapset_id}: {last_err}"
+        f"All mirrors failed for beatmapset {beatmapset_id}: " + "; ".join(errors)
     )
 
 
@@ -154,6 +228,33 @@ def download_beatmapsets_parallel(
 def polite_delay():
     """Sleep between downloads to be gentle on mirrors."""
     time.sleep(DOWNLOAD_DELAY)
+
+
+def log_failed_download(
+    beatmapset_id: int,
+    artist: str,
+    title: str,
+    error: str,
+    log_path: Path = FAILED_LOG_PATH,
+) -> None:
+    """Append one line recording a beatmapset that failed on every mirror.
+
+    Format: ``<iso-8601> | id=<id> | <artist> - <title> | <error>``. Append-only
+    (existing entries are never touched) and thread-safe, so the parallel
+    download workers can't interleave a line mid-write. The `error` string is the
+    DownloadError message, which already names which mirror(s) failed and why.
+    """
+    def _clean(value) -> str:
+        return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    line = (
+        f"{ts} | id={beatmapset_id} | "
+        f"{_clean(artist)} - {_clean(title)} | {_clean(error)}\n"
+    )
+    with _failed_log_lock:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def find_broken_osz(dest_dir: Path) -> list[Path]:

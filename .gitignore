@@ -13,6 +13,9 @@ songs/
 *.sqlite
 *.sqlite3
 
+# Failed-download log (runtime record, per-machine)
+failed_downloads.log
+
 # Python
 __pycache__/
 *.py[cod]

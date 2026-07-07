@@ -46,7 +46,7 @@ from src.client import OsuClient, BeatmapsetHit
 from src.download import (
     download_beatmapset, download_beatmapsets_parallel, DownloadResult,
     DownloadError, DEFAULT_DOWNLOAD_DIR, bundle_osz, bundle_osz_split,
-    cleanup_broken_osz,
+    cleanup_broken_osz, log_failed_download,
 )
 from src.registry import Registry
 from src.search import sweep_search
@@ -1224,6 +1224,9 @@ class DownloadWorker(QThread):
                                    f"Downloaded: {hit.artist} - {hit.title}")
             else:
                 self.error_single.emit(hit.id, result.error)
+                # Durable record of the failure so it isn't lost when the GUI
+                # closes. Safe to call from the parallel result callback.
+                log_failed_download(hit.id, hit.artist, hit.title, result.error)
                 self.progress.emit(completed, len(self.hits),
                                    f"Failed: {hit.artist} - {hit.title}")
 
