@@ -70,6 +70,15 @@ class Registry:
         )
         self.conn.commit()
 
+    def remove(self, beatmapset_id: int) -> bool:
+        """Forget a beatmapset so it can be re-downloaded. Returns True if a
+        row was actually deleted."""
+        cur = self.conn.execute(
+            "DELETE FROM downloads WHERE beatmapset_id = ?", (beatmapset_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def count(self) -> int:
         cur = self.conn.execute("SELECT COUNT(*) AS n FROM downloads")
         return cur.fetchone()["n"]

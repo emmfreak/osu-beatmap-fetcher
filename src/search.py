@@ -58,14 +58,20 @@ def sweep_search(
     length_min: int | None = None,
     length_max: int | None = None,
     keyword: str | None = None,
+    on_progress=None,
 ) -> list[BeatmapsetHit]:
     """Run a full shard + sort-sweep search, returning deduplicated hits.
 
     Returns up to `max_total` unique BeatmapsetHit objects that are NOT
     already in the registry.
+
+    `on_progress(sweeps_done, sweeps_total, found, target)` is called after each
+    sort-sweep API call so callers can show progress / estimate time remaining.
     """
     registry_ids = _load_registry_ids(registry)
     shards = _compute_shards(star_min, star_max)
+    sweeps_total = len(shards) * len(SWEEP_SORTS)
+    sweeps_done = 0
 
     pool: dict[int, BeatmapsetHit] = {}
 
@@ -96,6 +102,10 @@ def sweep_search(
             for h in hits:
                 if h.id not in pool and h.id not in registry_ids:
                     pool[h.id] = h
+
+            sweeps_done += 1
+            if on_progress:
+                on_progress(sweeps_done, sweeps_total, len(pool), max_total)
 
         if len(pool) >= max_total:
             break
