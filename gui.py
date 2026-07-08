@@ -20,6 +20,7 @@ main visual ideas:
 """
 
 import math
+import random
 import sys
 import tempfile
 import time
@@ -27,8 +28,9 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QSize, QRect, QRectF, QPointF, QUrl, QEvent,
-    QSettings,
+    Qt, QThread, pyqtSignal, QSize, QRect, QRectF, QPoint, QPointF, QUrl,
+    QEvent, QSettings, QTimer, QVariantAnimation, QPropertyAnimation,
+    QParallelAnimationGroup, QEasingCurve, QAbstractAnimation,
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QPainter, QPainterPath, QPolygonF,
@@ -39,6 +41,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QLabel, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox,
     QPushButton, QProgressBar, QMessageBox, QFrame, QScrollArea, QCheckBox,
     QButtonGroup, QFileDialog, QSplitter, QSizePolicy,
+    QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -94,6 +97,56 @@ BADGE_KEYS_TEXT = "#EC90D2"
 STATUS_OK_BG = "#1f3129"
 STATUS_ERR_BG = "#361f27"
 STATUS_DUPE_BG = "#212a3d"
+
+# ── Motion system ────────────────────────────────────────────────────
+# One easing family, three duration tiers. Micro = hover/press/focus;
+# state = selection/value/status changes; orchestrated = card entrances,
+# drawer, PP flow. Everything eases out — nothing linear, nothing bouncy
+# (the one OutBack is reserved for the downloaded-check resolve).
+
+DUR_MICRO = 150
+DUR_STATE = 220
+DUR_ENTER = 320
+DUR_DRAWER = 260
+EASE = QEasingCurve.Type.OutCubic
+EASE_RESOLVE = QEasingCurve.Type.OutBack
+
+# User preference (Preferences → Animations): when off, everything snaps —
+# entrances, hovers, glows, eased values, breathing icons. Set from QSettings
+# at startup and flipped live by the checkbox.
+_MOTION_ENABLED = True
+
+
+def motion_on() -> bool:
+    return _MOTION_ENABLED
+
+
+def set_motion_enabled(on: bool):
+    global _MOTION_ENABLED
+    _MOTION_ENABLED = on
+
+
+def lerp_color(c1: str | QColor, c2: str | QColor, t: float) -> QColor:
+    """Blend two colours; t=0 -> c1, t=1 -> c2 (alpha included)."""
+    a, b = QColor(c1), QColor(c2)
+    t = max(0.0, min(1.0, t))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+        round(a.alpha() + (b.alpha() - a.alpha()) * t),
+    )
+
+
+def make_anim(owner, duration: int, on_value, easing=EASE) -> QVariantAnimation:
+    """A 0.0->1.0 QVariantAnimation parented to `owner` (dies with it)."""
+    anim = QVariantAnimation(owner)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setDuration(duration)
+    anim.setEasingCurve(easing)
+    anim.valueChanged.connect(on_value)
+    return anim
 
 
 # ── Drawn icons (no emoji — QPainter for cross-platform consistency) ──
@@ -422,7 +475,8 @@ QLineEdit#rangeInner:focus, QDoubleSpinBox#rangeInner:focus {{
     border: none;
 }}
 
-/* Buttons */
+/* Buttons — one bright primary (Search); everything else recedes.
+   :pressed nudges padding 1px down = a subtle physical "sink". */
 QPushButton {{
     border: none;
     border-radius: 9px;
@@ -435,18 +489,31 @@ QPushButton#searchBtn {{
     color: white;
 }}
 QPushButton#searchBtn:hover {{ background-color: {ACCENT_PINK_HOVER}; }}
-QPushButton#searchBtn:pressed {{ background-color: {ACCENT_PINK_PRESSED}; }}
+QPushButton#searchBtn:pressed {{
+    background-color: {ACCENT_PINK_PRESSED};
+    padding-top: 10px; padding-bottom: 8px;
+}}
 QPushButton#downloadBtn {{
+    background-color: {BG_INPUT};
+    color: {ACCENT_PURPLE_HOVER};
+    border: 1px solid {ACCENT_PURPLE};
+}}
+QPushButton#downloadBtn:hover {{
     background-color: {ACCENT_PURPLE};
     color: white;
 }}
-QPushButton#downloadBtn:hover {{ background-color: {ACCENT_PURPLE_HOVER}; }}
+QPushButton#downloadBtn:pressed {{
+    background-color: {ACCENT_PURPLE};
+    color: white;
+    padding-top: 10px; padding-bottom: 8px;
+}}
 QPushButton#cancelBtn {{
     background-color: transparent;
     color: {RED_ERR};
     border: 1px solid #4a3038;
 }}
 QPushButton#cancelBtn:hover {{ background-color: #2e2027; }}
+QPushButton#cancelBtn:pressed {{ padding-top: 10px; padding-bottom: 8px; }}
 QPushButton#selectAllBtn, QPushButton#selectNoneBtn {{
     background-color: transparent;
     color: {TEXT_DIM};
@@ -473,10 +540,39 @@ QPushButton#browseBtn:hover {{
     color: {TEXT_PRIMARY};
     border-color: {ACCENT_PURPLE};
 }}
+QPushButton#browseBtn:pressed {{ padding-top: 8px; padding-bottom: 6px; }}
+QPushButton#advToggle {{
+    background-color: transparent;
+    color: {TEXT_DIM};
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: none;
+    border-radius: 7px;
+    text-align: left;
+}}
+QPushButton#advToggle:hover {{ color: {TEXT_SECONDARY}; }}
 QPushButton:disabled {{
     background-color: #26263a;
     color: {TEXT_FAINT};
     border-color: transparent;
+}}
+
+/* Footer console: preferences + status + actions live on one surface. */
+QFrame#footerPanel {{
+    background-color: {BG_SURFACE};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 14px;
+}}
+QLabel#countChip {{
+    color: {TEXT_SECONDARY};
+    background-color: {BG_INPUT_TRACK};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 9px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
 }}
 
 /* Progress */
@@ -645,29 +741,622 @@ class RangeField(QFrame):
         return super().eventFilter(obj, event)
 
 
-class GradientBar(QWidget):
-    """Thin rounded bar painted with a two-stop gradient (star difficulty cue)."""
+class StarSpectrum(QWidget):
+    """The star-range instrument: the full osu! difficulty spectrum as a dim
+    track, with the active [min, max] window lit at full colour.
 
-    def __init__(self, parent=None):
+    The window edges ease toward their targets instead of snapping, the active
+    section glows softly, and the handles are draggable — dragging routes
+    through the existing spin boxes (``setValue``), so the filter logic sees
+    exactly the same inputs as typing.
+    """
+
+    STAR_LO, STAR_HI = 0.0, 10.0  # displayed spectrum domain
+
+    def __init__(self, min_spin: QDoubleSpinBox, max_spin: QDoubleSpinBox,
+                 parent=None):
         super().__init__(parent)
-        self.setFixedHeight(5)
-        self._c1 = QColor(star_color(4.0))
-        self._c2 = QColor(star_color(5.0))
+        self._min_spin = min_spin
+        self._max_spin = max_spin
+        self.setFixedHeight(34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
 
-    def set_colors(self, c1: str, c2: str):
-        self._c1 = QColor(c1)
-        self._c2 = QColor(c2)
+        self._lo = min_spin.value()
+        self._hi = max_spin.value()
+        self._shown_lo = self._lo   # eased display values
+        self._shown_hi = self._hi
+        self._from_lo = self._lo
+        self._from_hi = self._hi
+        self._hover_t = 0.0
+        self._hover_target = False
+        self._dragging = None       # None | 'lo' | 'hi'
+
+        self._range_anim = QVariantAnimation(self)
+        self._range_anim.setDuration(DUR_STATE)
+        self._range_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._range_anim.valueChanged.connect(self._on_range_frame)
+
+        self._hover_anim = make_anim(self, DUR_MICRO, self._on_hover_frame)
+
+    # -- public --------------------------------------------------------
+
+    def set_range(self, lo: float, hi: float):
+        self._lo, self._hi = lo, hi
+        if self._dragging or not motion_on():
+            # 1:1 while the user physically holds a handle; snap if motion off.
+            self._range_anim.stop()
+            self._shown_lo, self._shown_hi = lo, hi
+            self.update()
+            return
+        self._range_anim.stop()
+        self._range_anim.setStartValue(0.0)
+        self._range_anim.setEndValue(1.0)
+        self._from_lo, self._from_hi = self._shown_lo, self._shown_hi
+        self._range_anim.start()
+
+    # -- animation frames ----------------------------------------------
+
+    def _on_range_frame(self, t):
+        self._shown_lo = self._from_lo + (self._lo - self._from_lo) * t
+        self._shown_hi = self._from_hi + (self._hi - self._from_hi) * t
+        self.update()
+
+    def _on_hover_frame(self, t):
+        self._hover_t = t if self._hover_target else 1.0 - t
+        self.update()
+
+    def _animate_hover(self, entering: bool):
+        self._hover_target = entering
+        self._hover_anim.stop()
+        if not motion_on():
+            self._hover_t = 1.0 if entering else 0.0
+            self.update()
+            return
+        self._hover_anim.start()
+
+    # -- geometry helpers ----------------------------------------------
+
+    def _track_rect(self) -> QRectF:
+        return QRectF(6, 9, self.width() - 12, 10)
+
+    def _star_to_x(self, s: float) -> float:
+        tr = self._track_rect()
+        f = (s - self.STAR_LO) / (self.STAR_HI - self.STAR_LO)
+        return tr.left() + max(0.0, min(1.0, f)) * tr.width()
+
+    def _x_to_star(self, x: float) -> float:
+        tr = self._track_rect()
+        f = (x - tr.left()) / max(1.0, tr.width())
+        return self.STAR_LO + max(0.0, min(1.0, f)) * (self.STAR_HI - self.STAR_LO)
+
+    # -- painting --------------------------------------------------------
+
+    def _spectrum_gradient(self, rect: QRectF, alpha: int) -> QLinearGradient:
+        grad = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        for stop in range(0, 11):
+            c = QColor(star_color(stop))
+            c.setAlpha(alpha)
+            grad.setColorAt(stop / 10.0, c)
+        return grad
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        tr = self._track_rect()
+
+        # Dim full-spectrum track: the whole difficulty landscape, receded.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(BG_INPUT_TRACK))
+        p.drawRoundedRect(tr, 5, 5)
+        p.setBrush(self._spectrum_gradient(tr, 46))
+        p.drawRoundedRect(tr, 5, 5)
+
+        # Active window, lit.
+        x1 = self._star_to_x(min(self._shown_lo, self._shown_hi))
+        x2 = self._star_to_x(max(self._shown_lo, self._shown_hi))
+        if x2 - x1 >= 1:
+            active = QRectF(x1, tr.top(), x2 - x1, tr.height())
+            # soft under-glow, brighter on hover/drag
+            glow_a = int(50 + 60 * self._hover_t + (30 if self._dragging else 0))
+            mid = star_color((min(self._shown_lo, self._shown_hi)
+                              + max(self._shown_lo, self._shown_hi)) / 2)
+            gc = QColor(mid)
+            gc.setAlpha(glow_a)
+            p.setBrush(gc)
+            p.drawRoundedRect(active.adjusted(-2, -2.5, 2, 2.5), 7, 7)
+            # full-colour spectrum section
+            p.setClipRect(active)
+            p.setBrush(self._spectrum_gradient(tr, 255))
+            p.drawRoundedRect(tr, 5, 5)
+            p.setClipping(False)
+
+        # Handles: slim pills at the window edges.
+        for x in (x1, x2):
+            hr = QRectF(x - 2.5, tr.top() - 3.5, 5, tr.height() + 7)
+            p.setBrush(QColor(TEXT_PRIMARY))
+            p.drawRoundedRect(hr, 2.5, 2.5)
+
+        # Tick labels: sparse star marks under the track.
+        p.setPen(QColor(TEXT_FAINT))
+        f = p.font()
+        f.setPixelSize(9)
+        p.setFont(f)
+        for s in (2, 4, 6, 8):
+            x = self._star_to_x(s)
+            p.drawText(QRectF(x - 10, tr.bottom() + 2, 20, 12),
+                       Qt.AlignmentFlag.AlignCenter, f"{s}")
+        p.end()
+
+    # -- interaction -----------------------------------------------------
+
+    def enterEvent(self, event):
+        self._animate_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_hover(False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        x = event.position().x()
+        d_lo = abs(x - self._star_to_x(self._lo))
+        d_hi = abs(x - self._star_to_x(self._hi))
+        self._dragging = "lo" if d_lo <= d_hi else "hi"
+        self._drag_to(x)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._drag_to(event.position().x())
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = None
+        self.update()
+
+    def _drag_to(self, x: float):
+        val = round(self._x_to_star(x) * 20) / 20  # snap to 0.05
+        # Route through the spin boxes — same code path as typing a value.
+        spin = self._min_spin if self._dragging == "lo" else self._max_spin
+        spin.setValue(val)
+
+
+class RotatingChevron(QWidget):
+    """A chevron glyph that eases between pointing down (0) and up (1)."""
+
+    def __init__(self, size: int = 14, color: str = TEXT_DIM, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self._color = color
+        self._t = 0.0
+        self.setFixedSize(size, size)
+        self._anim = make_anim(self, DUR_DRAWER, self._on_frame)
+
+    def set_open(self, is_open: bool):
+        self._target = is_open
+        self._anim.stop()
+        if not motion_on():
+            self.snap_open(is_open)
+            return
+        self._anim.start()
+
+    def snap_open(self, is_open: bool):
+        self._t = 1.0 if is_open else 0.0
+        self.update()
+
+    def _on_frame(self, t):
+        self._t = t if self._target else 1.0 - t
         self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        grad = QLinearGradient(0, 0, self.width(), 0)
-        grad.setColorAt(0.0, self._c1)
-        grad.setColorAt(1.0, self._c2)
+        p.translate(self._size / 2, self._size / 2)
+        p.rotate(180 * self._t)
+        p.translate(-self._size / 2, -self._size / 2)
+        _draw_chevron(p, self._size, QColor(self._color))
+        p.end()
+
+
+class CollapsibleSection(QWidget):
+    """A container whose height eases open/closed (the advanced-filters drawer).
+
+    Emits ``animation_tick`` every frame so the owner can keep the splitter
+    balance honest while the filter panel's size-hint changes.
+    """
+    animation_tick = pyqtSignal()
+
+    def __init__(self, content: QWidget, parent=None):
+        super().__init__(parent)
+        self._content = content
+        self._open = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(content)
+        self.setMaximumHeight(0)
+
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(DUR_DRAWER)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_frame)
+        self._anim.finished.connect(self._on_finished)
+
+    def is_open(self) -> bool:
+        return self._open
+
+    def open_progress(self) -> float:
+        """0.0 closed -> 1.0 fully open, tracking the eased height."""
+        full = max(1, self._content.sizeHint().height())
+        return max(0.0, min(1.0, self.height() / full))
+
+    def set_open(self, want_open: bool, animate: bool = True):
+        if want_open == self._open:
+            return
+        self._open = want_open
+        target = self._content.sizeHint().height() if want_open else 0
+        if not animate:
+            self.setMaximumHeight(16777215 if want_open else 0)
+            self.animation_tick.emit()
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self.height())
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _on_frame(self, h):
+        self.setMaximumHeight(int(h))
+        self.animation_tick.emit()
+
+    def _on_finished(self):
+        if self._open:
+            self.setMaximumHeight(16777215)  # let it breathe after opening
+        self.animation_tick.emit()
+
+
+class ZoomThumb(QLabel):
+    """Cover-art thumbnail that zooms gently within its frame on card hover."""
+
+    ZOOM = 0.06  # 6% push-in at full hover
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pm: QPixmap | None = None
+        self._t = 0.0
+        self.setFixedSize(ThumbnailManager.THUMB_W, ThumbnailManager.THUMB_H)
+        self.setStyleSheet(
+            f"background-color: {BG_INPUT_TRACK}; border-radius: 9px;"
+        )
+
+    def set_cover(self, pm: QPixmap):
+        self._pm = pm
+        self.setPixmap(pm)
+
+    def set_zoom_t(self, t: float):
+        if self._pm is None:
+            return
+        self._t = t
+        if t <= 0.001:
+            self.setPixmap(self._pm)
+            return
+        w, h = self.width(), self.height()
+        scale = 1.0 + self.ZOOM * t
+        zoomed = self._pm.scaled(
+            round(w * scale), round(h * scale),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(zoomed.copy(
+            (zoomed.width() - w) // 2, (zoomed.height() - h) // 2, w, h
+        ))
+
+
+class GlowButton(QPushButton):
+    """QPushButton with a soft accent glow that eases in on hover.
+
+    One drop-shadow effect per button, animated only on enter/leave — used for
+    the two buttons that matter (Search / Download), not scattered everywhere.
+    """
+
+    def __init__(self, text: str, glow: str, parent=None):
+        super().__init__(text, parent)
+        self._glow_color = QColor(glow)
+        self._effect = QGraphicsDropShadowEffect(self)
+        self._effect.setOffset(0, 2)
+        self._effect.setBlurRadius(18)
+        c = QColor(self._glow_color)
+        c.setAlpha(0)
+        self._effect.setColor(c)
+        self.setGraphicsEffect(self._effect)
+        self._anim = make_anim(self, DUR_MICRO, self._on_frame)
+        self._target = False
+
+    def _on_frame(self, t):
+        t = t if self._target else 1.0 - t
+        c = QColor(self._glow_color)
+        c.setAlpha(int(110 * t))
+        self._effect.setColor(c)
+        self._effect.setBlurRadius(18 + 8 * t)
+
+    def enterEvent(self, event):
+        if self.isEnabled() and motion_on():
+            self._target = True
+            self._anim.stop()
+            self._anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._target = False
+        self._anim.stop()
+        if motion_on():
+            self._anim.start()
+        else:
+            self._on_frame(1.0)   # target False -> glow snaps off
+        super().leaveEvent(event)
+
+
+class PulsingIcon(QWidget):
+    """A drawn icon that breathes slowly — used in empty/loading placeholders."""
+
+    def __init__(self, name: str, size: int, color: str, parent=None):
+        super().__init__(parent)
+        self._pm = icon_pixmap(name, size, color)
+        self._alpha = 0.9
+        self.setFixedSize(size, size)
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(2400)
+        self._anim.setLoopCount(-1)
+        self._anim.valueChanged.connect(self._on_frame)
+        if motion_on():
+            self._anim.start()
+        else:
+            self._alpha = 0.75  # calm static icon, no breathing
+
+    def _on_frame(self, t):
+        # Cosine breath: continuous across loop restarts (t=0 == t=1).
+        self._alpha = 0.45 + 0.5 * (0.5 - 0.5 * math.cos(2 * math.pi * t))
+        self.update()
+
+    def hideEvent(self, event):
+        self._anim.pause()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        if self._anim.state() == QAbstractAnimation.State.Paused:
+            self._anim.resume()
+        super().showEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setOpacity(max(0.3, min(1.0, self._alpha)))
+        p.drawPixmap(0, 0, self._pm)
+        p.end()
+
+
+class PPFlowStrip(QWidget):
+    """Hero moment: the PP filter's hidden work, staged.
+
+    Driven entirely by the worker's real per-batch signal — each batch spawns
+    exactly the particles that batch contained: kept maps glide through the
+    gate and land in the kept counter; rejected ones fall away. Cache-resolved
+    sets zip through instantly; freshly computed ones hold at the gate for a
+    beat (the batch signal only ever arrives after real computation, so the
+    dramatization never runs ahead of the truth). Hidden entirely when the PP
+    filter is off.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(62)
+        self.setVisible(False)
+        self._particles: list[dict] = []
+        self._checked = 0
+        self._total = 0
+        self._kept = 0
+        self._cached = 0
+        self._computed = 0
+        self._range_text = ""
+        self._phase_active = False
+        self._pulse = 0.0
+        self._kept_flash = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self._fade = None
+
+    # -- lifecycle -------------------------------------------------------
+
+    def is_active(self) -> bool:
+        return self._phase_active
+
+    def begin_phase(self, range_text: str):
+        self._particles.clear()
+        self._checked = self._total = self._kept = 0
+        self._cached = self._computed = 0
+        self._range_text = range_text
+        self._phase_active = True
+        self._kept_flash = 0.0
+        if self._fade is not None:
+            self._fade.stop()
+            self._fade = None
+        if self.graphicsEffect():
+            self.setGraphicsEffect(None)  # clear any leftover fade
+        self.setVisible(True)
+        self._timer.start()
+
+    def on_batch(self, checked: int, total: int, passed: int,
+                 cached_sets: int, computed_diffs: int):
+        if not self._phase_active:
+            self.begin_phase(self._range_text)
+        batch_n = max(0, checked - self._checked)
+        kept_n = max(0, passed - self._kept)
+        self._checked, self._total = checked, total
+        self._cached += cached_sets
+        self._computed += computed_diffs
+        if kept_n > 0:
+            self._kept_flash = 1.0
+        self._kept = passed
+
+        # Spawn this batch's particles: fates match the real counts.
+        now = time.monotonic()
+        for i in range(batch_n):
+            kept = i < kept_n
+            cached = i < cached_sets
+            self._particles.append({
+                "born": now + i * 0.045,
+                "kept": kept,
+                "fast": cached,
+                "y_jit": random.uniform(-7, 7),
+                "dur": 0.5 if cached else 1.05,
+            })
+
+    def end_phase(self):
+        """Let remaining particles land, then fade the strip away."""
+        self._phase_active = False
+        QTimer.singleShot(650, self._fade_out)
+
+    def cancel_now(self):
+        self._phase_active = False
+        self._particles.clear()
+        self._timer.stop()
+        self.setVisible(False)
+
+    def _fade_out(self):
+        if self._phase_active:  # a new phase started meanwhile
+            return
+        eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(eff)
+        self._fade = QPropertyAnimation(eff, b"opacity", self)
+        self._fade.setStartValue(1.0)
+        self._fade.setEndValue(0.0)
+        self._fade.setDuration(280)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.finished.connect(self._after_fade)
+        self._fade.start()
+
+    def _after_fade(self):
+        self._timer.stop()
+        self._particles.clear()
+        self.setVisible(False)
+        self.setGraphicsEffect(None)
+
+    # -- animation loop ----------------------------------------------------
+
+    def _tick(self):
+        self._pulse = (self._pulse + 0.02) % 1.0
+        if self._kept_flash > 0:
+            self._kept_flash = max(0.0, self._kept_flash - 0.05)
+        now = time.monotonic()
+        self._particles = [
+            pt for pt in self._particles if now - pt["born"] < pt["dur"] + 0.3
+        ]
+        self.update()
+
+    # -- painting ----------------------------------------------------------
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        mid_y = h / 2 - 4
+        gate_x = w * 0.42
+
+        # Surface
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(grad)
-        p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 2.5, 2.5)
+        p.setBrush(QColor(BG_INPUT_TRACK))
+        p.drawRoundedRect(QRectF(0, 0, w, h), 10, 10)
+
+        # Lane line
+        lane = QColor(BORDER_SUBTLE)
+        p.setPen(QPen(lane, 1))
+        p.drawLine(QPointF(14, mid_y), QPointF(w - 14, mid_y))
+
+        # Gate ring (osu-style), pulsing gently while the phase works.
+        pulse = 0.5 + 0.5 * math.sin(self._pulse * 2 * math.pi)
+        ring = QColor(ACCENT_PINK)
+        ring.setAlpha(int(150 + 70 * pulse) if self._phase_active else 120)
+        p.setPen(QPen(ring, 2.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        r = 13 + (1.5 * pulse if self._phase_active else 0)
+        p.drawEllipse(QPointF(gate_x, mid_y), r, r)
+
+        # Particles
+        now = time.monotonic()
+        for pt in self._particles:
+            age = now - pt["born"]
+            if age < 0:
+                continue
+            f = min(1.0, age / pt["dur"])
+            # Computed particles hold briefly at the gate (~55-70% of life).
+            if not pt["fast"]:
+                if 0.5 < f < 0.68:
+                    f = 0.5
+                elif f >= 0.68:
+                    f = 0.5 + (f - 0.68) / 0.32 * 0.5
+            eased = 1 - (1 - f) ** 3
+            if pt["kept"]:
+                x = 16 + (w - 100 - 16) * eased
+                y = mid_y + pt["y_jit"] * (1 - eased)
+                c = QColor(ACCENT_PINK) if x >= gate_x else QColor(TEXT_SECONDARY)
+                alpha = 255
+            else:
+                # Rejected: travel to the gate, then fall away and fade.
+                gate_f = min(1.0, eased * 2.0)
+                x = 16 + (gate_x - 16) * gate_f
+                drop = max(0.0, eased - 0.5) * 2.0
+                y = mid_y + pt["y_jit"] * (1 - gate_f) + drop * 16
+                c = QColor(TEXT_DIM)
+                alpha = int(255 * (1.0 - drop))
+            c.setAlpha(max(0, alpha))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            size = 5 if pt["kept"] else 4
+            p.drawEllipse(QPointF(x, y), size / 2 + 1, size / 2 + 1)
+
+        # Left label
+        p.setPen(QColor(TEXT_DIM))
+        f = p.font()
+        f.setPixelSize(10)
+        f.setBold(True)
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+        p.setFont(f)
+        p.drawText(QRectF(14, 4, 220, 14), Qt.AlignmentFlag.AlignLeft |
+                   Qt.AlignmentFlag.AlignVCenter,
+                   f"PP FILTER  {self._range_text}")
+
+        # Right: kept counter (flashes as maps land) + cache/computed detail.
+        kept_c = lerp_color(ACCENT_PINK, "#FFFFFF", self._kept_flash * 0.7)
+        p.setPen(kept_c)
+        f2 = p.font()
+        f2.setPixelSize(13)
+        f2.setBold(True)
+        f2.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.0)
+        p.setFont(f2)
+        p.drawText(QRectF(w - 210, mid_y - 16, 196, 18),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   f"{self._kept} kept")
+        p.setPen(QColor(TEXT_FAINT))
+        f3 = p.font()
+        f3.setPixelSize(9)
+        f3.setBold(False)
+        p.setFont(f3)
+        p.drawText(QRectF(w - 260, mid_y + 3, 246, 14),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   f"{self._checked}/{self._total} checked · "
+                   f"{self._cached} cached · {self._computed} computed")
+
+        # Bottom progress line — the honest determinate readout.
+        if self._total > 0:
+            frac = self._checked / self._total
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0, QColor(ACCENT_PINK))
+            grad.setColorAt(1, QColor(ACCENT_PURPLE))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(grad)
+            p.drawRoundedRect(QRectF(10, h - 6, (w - 20) * frac, 3), 1.5, 1.5)
         p.end()
 
 
@@ -767,6 +1456,10 @@ class ThumbnailManager:
 # ── Beatmap Card Widget ─────────────────────────────────────────────
 
 class BeatmapCard(QFrame):
+    """One result. All background/border state is painted (not stylesheeted)
+    so hover / selection / download-status transitions interpolate smoothly —
+    and cards that aren't moving cost nothing extra."""
+
     selection_changed = pyqtSignal(int, bool)
 
     def __init__(self, hit: BeatmapsetHit, index: int, parent=None):
@@ -776,12 +1469,23 @@ class BeatmapCard(QFrame):
         self._selected = True
         self._hovered = False
         self._dl_status = None  # None | 'ok' | 'error' | 'dupe'
+
+        # Animated state (0..1). Animations are created lazily so a list of
+        # thousands of cards allocates nothing until a card is interacted with.
+        self._hover_t = 0.0
+        self._select_t = 1.0     # cards start selected
+        self._status_flash = 0.0
+        self._hover_anim = None
+        self._select_anim = None
+        self._flash_anim = None
+        self._entrance_group = None
+
         self.setFixedHeight(114)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         self._setup_ui()
         self._load_thumbnail()
-        self._update_style()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -811,14 +1515,8 @@ class BeatmapCard(QFrame):
         self.checkbox.toggled.connect(self._on_toggled)
         layout.addWidget(self.checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Thumbnail
-        self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(
-            ThumbnailManager.THUMB_W, ThumbnailManager.THUMB_H
-        )
-        self.thumb_label.setStyleSheet(
-            f"background-color: {BG_INPUT_TRACK}; border-radius: 9px;"
-        )
+        # Thumbnail (zooms gently within its frame on hover)
+        self.thumb_label = ZoomThumb()
         layout.addWidget(self.thumb_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Info section
@@ -931,55 +1629,84 @@ class BeatmapCard(QFrame):
     def _set_thumbnail(self, pixmap: QPixmap):
         # Pixmap is already sized/rounded by the manager — set it directly
         # so cover art stays crisp (no double-scaling).
-        self.thumb_label.setPixmap(pixmap)
+        self.thumb_label.set_cover(pixmap)
+
+    # -- animated state ------------------------------------------------
+
+    def _drive_hover(self, t: float):
+        self._hover_t = t
+        self.thumb_label.set_zoom_t(t)
+        self.update()
+
+    def _drive_select(self, t: float):
+        self._select_t = t
+        self.update()
+
+    def _drive_flash(self, t: float):
+        self._status_flash = 1.0 - t   # 1 -> 0 settle
+        self.update()
+
+    def _animate(self, attr: str, drive, target: float, duration: int,
+                 current: float, easing=EASE):
+        """Start (or retarget) one of the card's lazy QVariantAnimations.
+        With motion disabled, the value snaps straight to its target."""
+        if not motion_on():
+            anim = getattr(self, attr)
+            if anim is not None:
+                anim.stop()
+            drive(target)
+            return
+        anim = getattr(self, attr)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            setattr(self, attr, anim)
+        anim.stop()
+        anim.setDuration(duration)
+        anim.setEasingCurve(easing)
+        anim.setStartValue(current)
+        anim.setEndValue(target)
+        try:
+            anim.valueChanged.disconnect()
+        except TypeError:
+            pass
+        anim.valueChanged.connect(drive)
+        anim.start()
 
     def _on_toggled(self, checked: bool):
         self._selected = checked
-        self._update_style()
+        # User-driven toggle: ease the accent in/out.
+        self._animate("_select_anim", self._drive_select,
+                      1.0 if checked else 0.0, DUR_STATE, self._select_t)
         self.selection_changed.emit(self.index, checked)
 
     def _update_style(self):
-        # Border colour: download status wins, else selection/hover state.
-        if self._dl_status == "ok":
-            border = GREEN_OK
-        elif self._dl_status == "error":
-            border = RED_ERR
-        elif self._selected:
-            border = ACCENT_PURPLE
-        else:
-            border = BORDER_SUBTLE
-
-        if self._selected:
-            bg = BG_CARD_SELECTED_HOVER if self._hovered else BG_CARD_SELECTED
-        elif self._hovered:
-            bg = BG_CARD_HOVER
-        else:
-            bg = BG_CARD
-
-        width = 2 if (self._selected or self._dl_status in ("ok", "error")) else 1
-        self.setStyleSheet(
-            f"BeatmapCard {{ background-color: {bg}; "
-            f"border: {width}px solid {border}; border-radius: 12px; }}"
-        )
+        self.update()
 
     def set_selected(self, selected: bool):
         self._selected = selected
         self.checkbox.blockSignals(True)
         self.checkbox.setChecked(selected)
         self.checkbox.blockSignals(False)
-        self._update_style()
+        # Programmatic (Select All/None over thousands of cards): snap —
+        # a thousand simultaneous animations is noise, not polish.
+        if self._select_anim is not None:
+            self._select_anim.stop()
+        self._select_t = 1.0 if selected else 0.0
+        self.update()
 
     def is_selected(self) -> bool:
         return self._selected
 
     def enterEvent(self, event):
         self._hovered = True
-        self._update_style()
+        self._animate("_hover_anim", self._drive_hover, 1.0,
+                      DUR_MICRO, self._hover_t)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
-        self._update_style()
+        self._animate("_hover_anim", self._drive_hover, 0.0,
+                      DUR_MICRO, self._hover_t)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1000,8 +1727,120 @@ class BeatmapCard(QFrame):
         else:
             bg, color, icon = STATUS_OK_BG, GREEN_OK, "check"
 
-        self.status_row.addWidget(self._make_badge(text, bg, color, icon))
-        self._update_style()
+        badge = self._make_badge(text, bg, color, icon)
+        self.status_row.addWidget(badge)
+
+        # Earned moment: badge resolves in with a slight overshoot, and the
+        # border flashes the status colour before settling. Off-screen cards
+        # snap instead — a burst of 1000 dupe-skips shouldn't spawn 1000
+        # animations for rows nobody can see. Snaps too when motion is off.
+        if self.visibleRegion().isEmpty() or not motion_on():
+            self.update()
+            return
+
+        eff = QGraphicsOpacityEffect(badge)
+        badge.setGraphicsEffect(eff)
+        fade = QPropertyAnimation(eff, b"opacity", badge)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setDuration(DUR_STATE)
+        fade.setEasingCurve(EASE_RESOLVE)
+        fade.finished.connect(lambda b=badge: b.setGraphicsEffect(None))
+        fade.start()
+
+        self._animate("_flash_anim", self._drive_flash, 1.0, 650,
+                      0.0, easing=EASE)
+
+    # -- painting --------------------------------------------------------
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+
+        # Background: base -> selected (by select_t), then -> hover variant.
+        bg_plain = lerp_color(BG_CARD, BG_CARD_SELECTED, self._select_t)
+        bg_hover = lerp_color(BG_CARD_HOVER, BG_CARD_SELECTED_HOVER,
+                              self._select_t)
+        bg = lerp_color(bg_plain, bg_hover, self._hover_t)
+
+        # Border: download status wins; else selection accent.
+        if self._dl_status == "ok":
+            base_border = QColor(GREEN_OK)
+        elif self._dl_status == "error":
+            base_border = QColor(RED_ERR)
+        else:
+            base_border = lerp_color(BORDER_SUBTLE, ACCENT_PURPLE,
+                                     self._select_t)
+        if self._status_flash > 0:
+            base_border = lerp_color(base_border, "#FFFFFF",
+                                     self._status_flash * 0.55)
+
+        # Soft accent halo on hover (single hovered card -> cheap).
+        if self._hover_t > 0.01:
+            halo = QColor(ACCENT_PINK)
+            halo.setAlpha(int(46 * self._hover_t))
+            p.setPen(QPen(halo, 2.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                              13, 13)
+
+        width = 1.0 + (1.0 * max(self._select_t,
+                                 1.0 if self._dl_status in ("ok", "error") else 0.0))
+        p.setPen(QPen(base_border, width))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, 12, 12)
+        p.end()
+
+    # -- entrance --------------------------------------------------------
+
+    def prepare_entrance(self):
+        """Hide the card (opacity 0) until its staggered reveal fires."""
+        eff = QGraphicsOpacityEffect(self)
+        eff.setOpacity(0.0)
+        self.setGraphicsEffect(eff)
+
+    def play_entrance(self, delay_ms: int):
+        """Fade + rise into the position the layout already gave us."""
+        timer = QTimer(self)          # parented: dies with the card
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._start_entrance)
+        timer.start(delay_ms)
+
+    def _start_entrance(self):
+        eff = self.graphicsEffect()
+        if eff is None:
+            return
+        final = self.pos()
+        self.move(final + QPoint(0, 14))
+
+        group = QParallelAnimationGroup(self)
+        fade = QPropertyAnimation(eff, b"opacity", self)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setDuration(DUR_ENTER)
+        fade.setEasingCurve(EASE)
+        rise = QPropertyAnimation(self, b"pos", self)
+        rise.setStartValue(final + QPoint(0, 14))
+        rise.setEndValue(final)
+        rise.setDuration(DUR_ENTER)
+        rise.setEasingCurve(EASE)
+        group.addAnimation(fade)
+        group.addAnimation(rise)
+        group.finished.connect(self._end_entrance)
+        self._entrance_group = group
+        group.start()
+
+    def _end_entrance(self):
+        # Remove the effect: persistent QGraphicsOpacityEffects are a
+        # scroll-performance tax, so they exist only during the reveal.
+        self.setGraphicsEffect(None)
+        self._entrance_group = None
+        # If the window resized mid-reveal, the layout's idea of our position
+        # may have moved — a coalesced invalidate re-syncs everyone once.
+        parent = self.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().invalidate()
 
 
 # ── Workers ──────────────────────────────────────────────────────────
@@ -1012,6 +1851,10 @@ class SearchWorker(QThread):
     error = pyqtSignal(str)
     pp_progress = pyqtSignal(int, int)
     sweep_progress = pyqtSignal(int, int, int, int)  # done, total, found, target
+    # Instrumentation for the PP-flow visual: checked, total, passed,
+    # cache-resolved sets this batch, freshly-computed diffs this batch.
+    # Purely additive — emitted beside pp_progress, alters no filtering logic.
+    pp_detail = pyqtSignal(int, int, int, int, int)
 
     def __init__(self, params: dict):
         super().__init__()
@@ -1121,6 +1964,11 @@ class SearchWorker(QThread):
                             fut = pool.submit(_fetch_and_compute, bm.id, bm.mode_int)
                             futures[fut] = (bi, bm)
 
+                # Snapshot for the flow visual: sets answered straight from
+                # cache vs diffs that needed real computation this batch.
+                batch_cached = len(resolved)
+                batch_computed = len(futures)
+
                 for fut in as_completed(futures):
                     if self._cancelled:
                         break
@@ -1155,6 +2003,8 @@ class SearchWorker(QThread):
 
                 checked = min(batch_start + BATCH_SIZE, total)
                 self.pp_progress.emit(checked, total)
+                self.pp_detail.emit(checked, total, len(passed),
+                                    batch_cached, batch_computed)
                 self.progress.emit(f"PP check: {checked}/{total} sets checked, {len(passed)} passed")
 
         return passed[:target_count]
@@ -1342,9 +2192,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("osu! Beatmap Fetcher")
-        # Tall enough that filters + actions + ~4 result cards all fit; the
-        # results list is the dominant pane (see the splitter setup below).
-        self.setMinimumSize(900, 980)
+        # Tall enough that the full core filter panel + footer + ~4 result
+        # cards all fit; the results list is the dominant pane (see the
+        # splitter setup below).
+        self.setMinimumSize(900, 1030)
         self.resize(1040, 1040)
 
         self.search_worker = None
@@ -1360,6 +2211,12 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("osu-beatmap-fetcher", "osu-beatmap-fetcher")
         saved_dir = self.settings.value("download_dir", "")
         self.download_dir = Path(saved_dir) if saved_dir else DEFAULT_DOWNLOAD_DIR
+
+        # Appearance prefs — read before any UI is built so construction-time
+        # motion checks (startup fade, breathing icons) see the right values.
+        set_motion_enabled(self.settings.value("motion_enabled", True, type=bool))
+        # The PP flow visual is opt-in: it's the flashiest thing in the app.
+        self._pp_visual = self.settings.value("pp_visual", False, type=bool)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1405,15 +2262,16 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([440, 700])
+        # Invisible until hovered — the divider announces itself only when the
+        # cursor is actually there to drag it.
         self.splitter.setStyleSheet(f"""
             QSplitter::handle:vertical {{
-                background-color: {BORDER_SUBTLE};
-                height: 3px;
-                margin: 5px 44%;
-                border-radius: 1px;
+                background-color: transparent;
+                margin: 3px 0;
+                border-radius: 2px;
             }}
             QSplitter::handle:vertical:hover {{
-                background-color: {TEXT_DIM};
+                background-color: {BORDER_SUBTLE};
             }}
         """)
 
@@ -1425,11 +2283,24 @@ class MainWindow(QMainWindow):
         self.splitter.splitterMoved.connect(self._on_splitter_moved)
 
         content_layout.addWidget(self.splitter, stretch=1)
-        # Save-to, action buttons and progress stay OUTSIDE the splitter at
-        # their natural height, so Search / Download are always visible.
-        content_layout.addWidget(self._build_save_location())
-        content_layout.addWidget(self._build_actions())
-        content_layout.addWidget(self._build_progress())
+
+        # The drawer changes the filter panel's size-hint while it animates;
+        # re-balance the splitter each frame so results keep their floor and
+        # nothing gets crushed (user-dragged balances are left alone).
+        self.adv_drawer.animation_tick.connect(self._on_drawer_tick)
+
+        # Footer console: preferences + status + actions on one surface,
+        # OUTSIDE the splitter so Search / Download are always visible.
+        footer = QFrame()
+        footer.setObjectName("footerPanel")
+        flay = QVBoxLayout(footer)
+        flay.setContentsMargins(16, 12, 16, 12)
+        flay.setSpacing(10)
+        flay.addWidget(self._build_save_location())
+        flay.addWidget(self._separator())
+        flay.addWidget(self._build_progress())
+        flay.addWidget(self._build_actions())
+        content_layout.addWidget(footer)
 
         main_layout.addWidget(content, 1)
 
@@ -1443,6 +2314,25 @@ class MainWindow(QMainWindow):
             "Set your filters above, then hit Search."
         )
         self.statusBar().showMessage("Ready — configure filters and search.")
+
+        # Quiet app-load reveal: content eases in once, effect removed after
+        # so it costs nothing past the first quarter-second.
+        if motion_on():
+            fx = QGraphicsOpacityEffect(content)
+            content.setGraphicsEffect(fx)
+            self._startup_anim = QPropertyAnimation(fx, b"opacity", self)
+            self._startup_anim.setStartValue(0.0)
+            self._startup_anim.setEndValue(1.0)
+            self._startup_anim.setDuration(240)
+            self._startup_anim.setEasingCurve(EASE)
+            self._startup_anim.finished.connect(
+                lambda c=content: c.setGraphicsEffect(None)
+            )
+            self._startup_anim.start()
+
+    def _on_drawer_tick(self):
+        if not self._splitter_user_set:
+            self._autosize_splitter()
 
     # ── Splitter auto-balance ──
 
@@ -1461,10 +2351,17 @@ class MainWindow(QMainWindow):
             desired_top = self._user_top
         else:
             desired_top = self._filters_panel.sizeHint().height()
-        # Results pane floor = 4 full cards (viewport) + the pane's own header
-        # ("Results" / Select-All row ~50px) so the *viewport* clears 4 cards.
-        min_results = 4 * 114 + 3 * 9 + 62
-        top = min(desired_top, max(120, total - min_results))
+        # Results pane floor = full cards (viewport) + the pane's own header
+        # ("Results" / Select-All row ~50px) so the *viewport* clears them.
+        # The floor breathes with the advanced drawer: 4 cards when it's
+        # closed, easing to 2 while it's open — the drawer visibly opens
+        # instead of vanishing into scroll, and results never get crushed
+        # (2 full cards is the worst case, restored the moment it closes).
+        # The 160px filters floor keeps the compact core panel (mode/keys,
+        # stars, keyword) fully visible even when the results floor pushes back.
+        cards_floor = 4 - 2 * self.adv_drawer.open_progress()
+        min_results = int(cards_floor * 114 + (cards_floor - 1) * 9 + 62)
+        top = min(desired_top, max(160, total - min_results))
         self._autosizing = True
         self.splitter.setSizes([top, total - top])
         self._autosizing = False
@@ -1493,10 +2390,10 @@ class MainWindow(QMainWindow):
         # that space belongs to the results list.
         panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         outer = QVBoxLayout(panel)
-        outer.setContentsMargins(20, 18, 20, 18)
-        outer.setSpacing(16)
+        outer.setContentsMargins(18, 12, 18, 10)
+        outer.setSpacing(10)
 
-        # ── Toggles row: Mode (left) + Keys (right) ──
+        # ── Row 1: Mode (left) + Keys (right) + Advanced toggle (far right) ──
         toggles = QHBoxLayout()
         toggles.setSpacing(12)
 
@@ -1519,79 +2416,62 @@ class MainWindow(QMainWindow):
         keys_block.addWidget(self.keys_seg, 0, Qt.AlignmentFlag.AlignRight)
         toggles.addLayout(keys_block)
 
+        # Advanced toggle rides row 1 so the core panel stays compact enough
+        # to always be fully visible above the results floor.
+        adv_block = QHBoxLayout()
+        adv_block.setSpacing(6)
+        self.adv_chevron = RotatingChevron(14, TEXT_DIM)
+        self.adv_toggle = QPushButton("ADVANCED")
+        self.adv_toggle.setObjectName("advToggle")
+        self.adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.adv_toggle.setToolTip("BPM, length, PP, status and count filters")
+        self.adv_toggle.clicked.connect(self._toggle_advanced)
+        self.adv_active_dot = QLabel("●")
+        self.adv_active_dot.setStyleSheet(
+            f"color: {ACCENT_PINK}; font-size: 10px; font-weight: 700; "
+            f"background: transparent;"
+        )
+        self.adv_active_dot.setToolTip("An advanced filter is set")
+        self.adv_active_dot.setVisible(False)
+        adv_block.addWidget(self.adv_chevron)
+        adv_block.addWidget(self.adv_toggle)
+        adv_block.addWidget(self.adv_active_dot)
+        adv_holder = QWidget()
+        adv_holder.setLayout(adv_block)
+        toggles.addSpacing(8)
+        toggles.addWidget(adv_holder, 0, Qt.AlignmentFlag.AlignBottom)
+
         outer.addLayout(toggles)
-        outer.addWidget(self._separator())
 
-        # ── Range / value grid ──
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(14)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        # ── Row 2: Stars (the instrument, wide) + Keyword ──
+        row2 = QHBoxLayout()
+        row2.setSpacing(20)
 
-        # Stars (with live difficulty gradient bar)
         self.star_min = self._num_spin(4.0)
         self.star_max = self._num_spin(5.0)
         star_field = RangeField(self.star_min, self.star_max)
-        self.star_bar = GradientBar()
+        star_field.setFixedWidth(168)
+        self.star_bar = StarSpectrum(self.star_min, self.star_max)
+
         stars_cell = QVBoxLayout()
         stars_cell.setSpacing(6)
         stars_cell.addWidget(self._section_label("Stars"))
-        stars_cell.addWidget(star_field)
-        stars_cell.addWidget(self.star_bar)
+        stars_inner = QHBoxLayout()
+        stars_inner.setSpacing(12)
+        stars_inner.addWidget(star_field, 0, Qt.AlignmentFlag.AlignTop)
+        stars_inner.addWidget(self.star_bar, 1)
+        stars_cell.addLayout(stars_inner)
         stars_wrap = QWidget()
         stars_wrap.setLayout(stars_cell)
-        grid.addWidget(stars_wrap, 0, 0)
+        row2.addWidget(stars_wrap, 5)
+
         self.star_min.valueChanged.connect(self._update_star_bar)
         self.star_max.valueChanged.connect(self._update_star_bar)
         self._update_star_bar()
 
-        # BPM
-        self.bpm_min = self._opt_line("min")
-        self.bpm_max = self._opt_line("max")
-        grid.addWidget(
-            self._cell("BPM", RangeField(self.bpm_min, self.bpm_max), optional=True),
-            0, 1
-        )
-
-        # Length
-        self.length_min = self._opt_line("min (s)")
-        self.length_max = self._opt_line("max (s)")
-        grid.addWidget(
-            self._cell("Length", RangeField(self.length_min, self.length_max), optional=True),
-            1, 0
-        )
-
-        # PP
-        self.pp_min = self._opt_line("min")
-        self.pp_max = self._opt_line("max")
-        grid.addWidget(
-            self._cell("PP", RangeField(self.pp_min, self.pp_max), optional=True),
-            1, 1
-        )
-
-        # Status
-        self.status_combo = QComboBox()
-        self.status_combo.addItems(["ranked", "loved", "qualified", "pending", "graveyard"])
-        self.status_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        grid.addWidget(self._cell("Status", self.status_combo), 2, 0)
-
-        # Count
-        self.count_spin = QSpinBox()
-        # No practical upper bound — user decides how many new maps to pull.
-        self.count_spin.setRange(1, 1_000_000)
-        self.count_spin.setValue(10)
-        self.count_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self.count_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        grid.addWidget(self._cell("Count", self.count_spin, hint="new maps"), 2, 1)
-
-        outer.addLayout(grid)
-
-        # ── Keyword (full width, with search icon) ──
         kw_cell = QVBoxLayout()
         kw_cell.setSpacing(6)
         kw_cell.addWidget(self._section_label("Keyword", optional=True))
-
         kw_wrap = QFrame()
         kw_wrap.setObjectName("rangeField")
         kw_lay = QHBoxLayout(kw_wrap)
@@ -1600,14 +2480,94 @@ class MainWindow(QMainWindow):
         kw_lay.addWidget(IconLabel("search", 15, TEXT_DIM))
         self.keyword_input = QLineEdit()
         self.keyword_input.setObjectName("rangeInner")
-        self.keyword_input.setPlaceholderText(
-            "e.g. jumpstream, chordjack, tech — matches tags & difficulty names"
+        self.keyword_input.setPlaceholderText("e.g. jumpstream, chordjack, tech")
+        self.keyword_input.setToolTip(
+            "Free-text search — matches tags, difficulty names, title, artist."
         )
         kw_lay.addWidget(self.keyword_input, 1)
         kw_cell.addWidget(kw_wrap)
-        outer.addLayout(kw_cell)
+        kw_holder = QWidget()
+        kw_holder.setLayout(kw_cell)
+        row2.addWidget(kw_holder, 3)
+
+        # Count is a key control — always visible, next to Keyword.
+        self.count_spin = QSpinBox()
+        # No practical upper bound — user decides how many new maps to pull.
+        self.count_spin.setRange(1, 1_000_000)
+        self.count_spin.setValue(10)
+        self.count_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.count_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        count_holder = self._cell("Count", self.count_spin, hint="new maps")
+        count_holder.setFixedWidth(128)
+        row2.addWidget(count_holder, 0)
+
+        outer.addLayout(row2)
+
+        # ── Row 3: Advanced filters (collapsible drawer) ──
+        adv_content = QWidget()
+        grid = QGridLayout(adv_content)
+        grid.setContentsMargins(0, 10, 0, 4)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        self.bpm_min = self._opt_line("min")
+        self.bpm_max = self._opt_line("max")
+        grid.addWidget(
+            self._cell("BPM", RangeField(self.bpm_min, self.bpm_max), optional=True),
+            0, 0
+        )
+
+        self.length_min = self._opt_line("min (s)")
+        self.length_max = self._opt_line("max (s)")
+        grid.addWidget(
+            self._cell("Length", RangeField(self.length_min, self.length_max), optional=True),
+            0, 1
+        )
+
+        self.pp_min = self._opt_line("min")
+        self.pp_max = self._opt_line("max")
+        grid.addWidget(
+            self._cell("PP", RangeField(self.pp_min, self.pp_max), optional=True),
+            1, 0
+        )
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["ranked", "loved", "qualified", "pending", "graveyard"])
+        self.status_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        grid.addWidget(self._cell("Status", self.status_combo), 1, 1)
+
+        self.adv_drawer = CollapsibleSection(adv_content)
+        outer.addWidget(self.adv_drawer)
+
+        # Restore drawer state; indicator tracks any non-default advanced value.
+        adv_open = self.settings.value("adv_open", False, type=bool)
+        if adv_open:
+            self.adv_drawer.set_open(True, animate=False)
+            self.adv_chevron.snap_open(True)
+        for le in (self.bpm_min, self.bpm_max, self.length_min,
+                   self.length_max, self.pp_min, self.pp_max):
+            le.textChanged.connect(self._update_adv_indicator)
+        self.status_combo.currentTextChanged.connect(self._update_adv_indicator)
 
         return panel
+
+    def _toggle_advanced(self):
+        want_open = not self.adv_drawer.is_open()
+        self.adv_drawer.set_open(want_open, animate=motion_on())
+        self.adv_chevron.set_open(want_open)
+        self.settings.setValue("adv_open", want_open)
+
+    def _update_adv_indicator(self, *_):
+        # Count lives in the core row now — only truly hidden filters count.
+        active = bool(
+            self.bpm_min.text().strip() or self.bpm_max.text().strip()
+            or self.length_min.text().strip() or self.length_max.text().strip()
+            or self.pp_min.text().strip() or self.pp_max.text().strip()
+            or self.status_combo.currentText() != "ranked"
+        )
+        self.adv_active_dot.setVisible(active)
 
     # small builders --------------------------------------------------
 
@@ -1666,7 +2626,7 @@ class MainWindow(QMainWindow):
     def _update_star_bar(self):
         lo = min(self.star_min.value(), self.star_max.value())
         hi = max(self.star_min.value(), self.star_max.value())
-        self.star_bar.set_colors(star_color(lo), star_color(hi))
+        self.star_bar.set_range(lo, hi)
 
     # ── Action buttons ──
 
@@ -1676,14 +2636,16 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(2, 0, 2, 0)
         h.setSpacing(10)
 
-        self.search_btn = QPushButton("Search")
+        # One bright primary (Search, pink glow); Download is a quiet outline
+        # that fills purple on hover; Cancel is a ghost.
+        self.search_btn = GlowButton("Search", ACCENT_PINK)
         self.search_btn.setObjectName("searchBtn")
         self.search_btn.setFixedHeight(40)
         self.search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.search_btn.clicked.connect(self._on_search)
         h.addWidget(self.search_btn)
 
-        self.download_btn = QPushButton("Download Selected")
+        self.download_btn = GlowButton("Download Selected", ACCENT_PURPLE)
         self.download_btn.setObjectName("downloadBtn")
         self.download_btn.setFixedHeight(40)
         self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1702,9 +2664,8 @@ class MainWindow(QMainWindow):
         h.addStretch()
 
         self.result_count_label = QLabel("")
-        self.result_count_label.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: 600;"
-        )
+        self.result_count_label.setObjectName("countChip")
+        self.result_count_label.setVisible(False)
         h.addWidget(self.result_count_label)
 
         return w
@@ -1715,12 +2676,47 @@ class MainWindow(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(2, 0, 2, 0)
-        v.setSpacing(8)
+        v.setSpacing(7)
+
+        # Header row: PREFERENCES left; appearance toggles right (quiet,
+        # they're meta-preferences, not download options).
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        head.addWidget(self._section_label("Preferences"))
+        head.addStretch()
+
+        self.motion_check = QCheckBox("Animations")
+        self.motion_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.motion_check.setToolTip(
+            "Motion polish: card reveals, hover effects, eased transitions. "
+            "Untick and everything snaps instantly instead."
+        )
+        self.motion_check.setChecked(motion_on())
+        self.motion_check.setStyleSheet(self._checkbox_qss())
+        self.motion_check.toggled.connect(self._on_motion_toggled)
+        head.addWidget(self.motion_check)
+
+        self.pp_visual_check = QCheckBox("PP filter visual")
+        self.pp_visual_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pp_visual_check.setToolTip(
+            "Show the animated map-flow visualization while the PP filter "
+            "computes (off = plain progress bar)."
+        )
+        self.pp_visual_check.setChecked(self._pp_visual)
+        self.pp_visual_check.setStyleSheet(self._checkbox_qss())
+        self.pp_visual_check.toggled.connect(self._on_pp_visual_toggled)
+        head.addWidget(self.pp_visual_check)
+
+        v.addLayout(head)
 
         # Row 1: folder chooser
         h = QHBoxLayout()
         h.setSpacing(10)
-        h.addWidget(self._section_label("Save to"))
+        save_lbl = QLabel("Save to")
+        save_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; background: transparent;"
+        )
+        h.addWidget(save_lbl)
 
         self.dir_display = QLineEdit(str(self.download_dir))
         self.dir_display.setReadOnly(True)
@@ -1745,26 +2741,26 @@ class MainWindow(QMainWindow):
         h.addWidget(self.cleanup_btn)
         v.addLayout(h)
 
-        # Row 2: bundle-into-one-zip toggle
-        self.bundle_check = QCheckBox(
-            "Bundle downloaded maps into a single .zip (easy to send)"
-        )
+        # Row 2: output options on one line — bundle, split, AFK auto-download.
+        # Labels are short; the full explanations live in the tooltips.
+        opts = QHBoxLayout()
+        opts.setSpacing(8)
+
+        self.bundle_check = QCheckBox("Bundle into one .zip")
         self.bundle_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self.bundle_check.setToolTip(
-            ".osz files are already compressed, so this packages them into one "
-            "archive for sharing rather than shrinking them further."
+            "Package downloaded maps into a single archive for easy sending. "
+            ".osz files are already compressed, so this bundles rather than "
+            "shrinks them."
         )
         self.bundle_check.setChecked(
             self.settings.value("bundle_zip", False, type=bool)
         )
         self.bundle_check.setStyleSheet(self._checkbox_qss())
         self.bundle_check.toggled.connect(self._on_bundle_toggled)
-        v.addWidget(self.bundle_check)
+        opts.addWidget(self.bundle_check)
 
-        # Row 3: split-into-parts toggle (indented under the bundle option)
-        split_row = QHBoxLayout()
-        split_row.setContentsMargins(26, 0, 0, 0)
-        split_row.setSpacing(8)
+        opts.addSpacing(10)
 
         self.split_check = QCheckBox("Split into parts of")
         self.split_check.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1775,7 +2771,7 @@ class MainWindow(QMainWindow):
         self.split_check.setChecked(self.settings.value("split_parts", False, type=bool))
         self.split_check.setStyleSheet(self._checkbox_qss())
         self.split_check.toggled.connect(self._on_split_toggled)
-        split_row.addWidget(self.split_check)
+        opts.addWidget(self.split_check)
 
         self.split_amount = QLineEdit(str(self.settings.value("split_amount", "2")))
         self.split_amount.setFixedWidth(52)
@@ -1784,7 +2780,7 @@ class MainWindow(QMainWindow):
         self.split_amount.textChanged.connect(
             lambda t: self.settings.setValue("split_amount", t)
         )
-        split_row.addWidget(self.split_amount)
+        opts.addWidget(self.split_amount)
 
         self.split_unit_combo = QComboBox()
         self.split_unit_combo.addItems(["GB each", "maps each"])
@@ -1797,26 +2793,25 @@ class MainWindow(QMainWindow):
         self.split_unit_combo.currentTextChanged.connect(
             lambda t: self.settings.setValue("split_unit", t)
         )
-        split_row.addWidget(self.split_unit_combo)
-        split_row.addStretch()
-        v.addLayout(split_row)
+        opts.addWidget(self.split_unit_combo)
 
-        # Row 4: AFK auto-download — kick off downloading automatically as soon
-        # as a search finishes, so a search + full download run unattended.
-        self.auto_check = QCheckBox(
-            "Auto-download all results when a search finishes (AFK mode)"
-        )
+        opts.addSpacing(10)
+
+        self.auto_check = QCheckBox("Auto-download results (AFK)")
         self.auto_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self.auto_check.setToolTip(
-            "When a search completes, immediately start downloading every map it "
-            "found — no need to click Download."
+            "When a search completes, immediately start downloading every map "
+            "it found — no need to click Download."
         )
         self.auto_check.setChecked(self.settings.value("auto_download", False, type=bool))
         self.auto_check.setStyleSheet(self._checkbox_qss())
         self.auto_check.toggled.connect(
             lambda on: self.settings.setValue("auto_download", on)
         )
-        v.addWidget(self.auto_check)
+        opts.addWidget(self.auto_check)
+
+        opts.addStretch()
+        v.addLayout(opts)
 
         self._sync_bundle_controls()
 
@@ -1850,6 +2845,18 @@ class MainWindow(QMainWindow):
                 background-color: {BG_INPUT_TRACK};
             }}
         """
+
+    def _on_motion_toggled(self, on: bool):
+        set_motion_enabled(on)
+        self.settings.setValue("motion_enabled", on)
+
+    def _on_pp_visual_toggled(self, on: bool):
+        self._pp_visual = on
+        self.settings.setValue("pp_visual", on)
+        if not on and self.pp_strip.is_active():
+            # Turned off mid-phase: drop back to the plain progress bar.
+            self.pp_strip.cancel_now()
+            self.progress_bar.setVisible(self._busy)
 
     def _on_bundle_toggled(self, on: bool):
         self.settings.setValue("bundle_zip", on)
@@ -1982,6 +2989,10 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(2, 2, 2, 0)
         v.setSpacing(6)
 
+        # PP-filter flow visual — hidden unless a PP filter is actually running.
+        self.pp_strip = PPFlowStrip()
+        v.addWidget(self.pp_strip)
+
         # Message on the left, live speed / time-remaining on the right.
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -2043,7 +3054,7 @@ class MainWindow(QMainWindow):
         hv.setSpacing(10)
         hv.setContentsMargins(0, 0, 0, 0)
 
-        ic = IconLabel(icon, 52, TEXT_FAINT)
+        ic = PulsingIcon(icon, 52, TEXT_FAINT)
         hv.addWidget(ic, 0, Qt.AlignmentFlag.AlignHCenter)
 
         t = QLabel(title)
@@ -2119,6 +3130,7 @@ class MainWindow(QMainWindow):
             self.result_count_label.setText(f"{self._selected_count()}/{n} selected")
         else:
             self.result_count_label.setText("")
+        self.result_count_label.setVisible(bool(n))
 
     def _set_busy(self, busy: bool):
         self._busy = busy
@@ -2151,9 +3163,21 @@ class MainWindow(QMainWindow):
         self.result_count_label.setText("")
         self.progress_label.setText("Starting search...")
 
+        # Human-readable PP range for the flow strip's label.
+        pp_min, pp_max = params.get("pp_min"), params.get("pp_max")
+        if pp_min is not None and pp_max is not None:
+            self._pp_range_text = f"{pp_min:g}–{pp_max:g}"
+        elif pp_min is not None:
+            self._pp_range_text = f"{pp_min:g}+"
+        elif pp_max is not None:
+            self._pp_range_text = f"≤{pp_max:g}"
+        else:
+            self._pp_range_text = ""
+
         self.search_worker = SearchWorker(params)
         self.search_worker.progress.connect(self._on_search_progress)
         self.search_worker.pp_progress.connect(self._on_pp_progress)
+        self.search_worker.pp_detail.connect(self._on_pp_detail)
         self.search_worker.sweep_progress.connect(self._on_sweep_progress)
         self.search_worker.finished.connect(self._on_search_done)
         self.search_worker.error.connect(self._on_search_error)
@@ -2177,7 +3201,22 @@ class MainWindow(QMainWindow):
         eta = self._estimate_eta("pp", checked, total)
         self.eta_label.setText(f"~{fmt_duration(eta)} left" if eta is not None else "")
 
+    def _on_pp_detail(self, checked: int, total: int, passed: int,
+                      cached: int, computed: int):
+        # Opt-in show (Preferences → PP filter visual). Off by default: the
+        # thin progress bar (driven by pp_progress) covers the phase instead.
+        if not self._pp_visual:
+            return
+        # First batch opens the show; the flow strip takes over from the thin
+        # bar (it carries its own progress line, fed by the same numbers).
+        if not self.pp_strip.is_active():
+            self.pp_strip.begin_phase(self._pp_range_text)
+            self.progress_bar.setVisible(False)
+        self.pp_strip.on_batch(checked, total, passed, cached, computed)
+
     def _on_search_done(self, hits: list):
+        if self.pp_strip.is_active():
+            self.pp_strip.end_phase()   # let the last particles land, then fade
         self.current_hits = hits
         self._populate_cards(hits)
         self._set_busy(False)
@@ -2196,6 +3235,7 @@ class MainWindow(QMainWindow):
             self._on_download()
 
     def _on_search_error(self, msg: str):
+        self.pp_strip.cancel_now()
         self._set_busy(False)
         self.eta_label.setText("")
         self._show_placeholder("cross", "Search failed", msg)
@@ -2211,6 +3251,12 @@ class MainWindow(QMainWindow):
         self.select_all_btn.setVisible(False)
         self.select_none_btn.setVisible(False)
 
+    # First N cards get the staggered reveal; anything below the fold appears
+    # instantly. Effects are stripped after the reveal, so with thousands of
+    # results scrolling never carries a per-card animation tax.
+    ENTRANCE_CARDS = 12
+    ENTRANCE_STAGGER_MS = 36
+
     def _populate_cards(self, hits: list[BeatmapsetHit]):
         self._clear_cards()
 
@@ -2224,14 +3270,29 @@ class MainWindow(QMainWindow):
         self.select_all_btn.setVisible(True)
         self.select_none_btn.setVisible(True)
 
+        animate_n = min(len(hits), self.ENTRANCE_CARDS) if motion_on() else 0
         for i, hit in enumerate(hits):
             card = BeatmapCard(hit, i)
             card.selection_changed.connect(self._on_card_selection_changed)
+            if i < animate_n:
+                card.prepare_entrance()
             self.cards.append(card)
             self.cards_by_id[hit.id] = card
             self.cards_layout.addWidget(card)
 
         self.cards_layout.addStretch()
+
+        # Layout positions are only valid after a pass — start reveals next
+        # tick. Guarded: a rapid re-search deletes cards mid-flight.
+        reveal = self.cards[:animate_n]
+
+        def start_reveals():
+            for i, card in enumerate(reveal):
+                try:
+                    card.play_entrance(i * self.ENTRANCE_STAGGER_MS)
+                except RuntimeError:
+                    return  # cards were cleared under us — nothing to reveal
+        QTimer.singleShot(0, start_reveals)
 
     def _on_card_selection_changed(self, index: int, selected: bool):
         self._update_count_label()
@@ -2370,6 +3431,7 @@ class MainWindow(QMainWindow):
             self.download_worker.cancel()
             self.progress_label.setText("Cancelling download...")
             self.statusBar().showMessage("Cancelling...")
+        self.pp_strip.cancel_now()   # no orphaned show after a cancel
         self.eta_label.setText("")
         self._set_busy(False)
 
