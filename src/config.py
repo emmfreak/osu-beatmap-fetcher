@@ -7,8 +7,10 @@ See config.json.template for the expected shape.
 import json
 from pathlib import Path
 
-# config.json lives at the repo root (one level up from src/).
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+from .paths import app_base_dir
+
+# config.json lives at the repo root (next to the .exe when frozen).
+DEFAULT_CONFIG_PATH = app_base_dir() / "config.json"
 
 
 class ConfigError(Exception):

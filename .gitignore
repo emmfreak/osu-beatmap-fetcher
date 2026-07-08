@@ -24,6 +24,10 @@ __pycache__/
 venv/
 env/
 
+# PyInstaller build output
+build/
+dist/
+
 # OS / editor
 .DS_Store
 .vscode/

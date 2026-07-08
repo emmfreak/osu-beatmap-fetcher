@@ -8,7 +8,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "registry.db"
+from .paths import app_base_dir
+
+DEFAULT_DB_PATH = app_base_dir() / "registry.db"
 
 
 class Registry:

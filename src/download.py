@@ -16,8 +16,11 @@ from typing import Callable
 
 import requests
 
-# Repo root (one level up from src/) — same base dir the registry.db lives in.
-_BASE_DIR = Path(__file__).resolve().parent.parent
+from .paths import app_base_dir
+
+# Repo root when run from source; the .exe's folder when frozen — same base
+# dir the registry.db lives in.
+_BASE_DIR = app_base_dir()
 DEFAULT_DOWNLOAD_DIR = _BASE_DIR / "downloads"
 
 # Durable record of downloads that failed on every mirror. Lives next to

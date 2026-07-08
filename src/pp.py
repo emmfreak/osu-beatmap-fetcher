@@ -21,9 +21,10 @@ import requests
 import rosu_pp_py as rosu
 
 from .client import BeatmapsetHit, BeatmapInfo
+from .paths import app_base_dir
 from .registry import Registry
 
-OSU_CACHE_DIR = Path(__file__).resolve().parent.parent / ".osu_cache"
+OSU_CACHE_DIR = app_base_dir() / ".osu_cache"
 _HEADERS = {"User-Agent": "osu-beatmap-fetcher/0.3 (slice3)"}
 FETCH_DELAY = 0.15
 
